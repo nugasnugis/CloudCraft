@@ -1,0 +1,54 @@
+name: CloudCraft Minecraft Runtime Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  minecraft-runtime:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check system
+        run: |
+          echo "=== CPU ==="
+          nproc
+
+          echo "=== RAM ==="
+          free -h
+
+          echo "=== Disk ==="
+          df -h
+
+      - name: Check Java
+        run: |
+          java -version || true
+
+      - name: Install Java 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openjdk-21-jre
+
+      - name: Verify Java
+        run: |
+          java -version
+
+      - name: Create Minecraft directory
+        run: |
+          mkdir -p "$HOME/.minecraft"
+
+      - name: Download Fabric Installer
+        run: |
+          curl -L \
+            -o fabric-installer.jar \
+            https://maven.fabricmc.net/net/fabricmc/fabric-installer/latest/fabric-installer.jar
+
+      - name: Install Fabric Client
+        run: |
+          java -jar fabric-installer.jar \
+            client \
+            -dir "$HOME/.minecraft" \
+            -mcversion 1.21.11
+
+      - name: Show Minecraft files
+        run: |
+          find "$HOME/.minecraft" -maxdepth 3 -type f | sort | head -100
