@@ -1,10 +1,10 @@
-name: CloudCraft Tailscale Test
+name: CloudCraft MinIO Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  tailscale-test:
+  minio-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,6 +19,38 @@ jobs:
         run: |
           tailscale status
 
-      - name: Test Raspberry Pi
+      - name: Install AWS CLI
         run: |
-          ping -c 4 100.95.112.101
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Test MinIO
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          aws s3 ls \
+            --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
+
+      - name: Upload test file
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          echo "Hello from CloudCraft GitHub Actions!" > hello.txt
+
+          aws s3 cp hello.txt \
+            s3://cloudcraft/test/hello.txt \
+            --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
+
+      - name: Verify uploaded file
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          aws s3 ls \
+            s3://cloudcraft/test/ \
+            --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
