@@ -21,4 +21,4 @@ jobs:
 
       - name: Test Raspberry Pi
         run: |
-          ping -c 4 PI_TAILSCALE_IP
+          ping -c 4 100.95.112.101
