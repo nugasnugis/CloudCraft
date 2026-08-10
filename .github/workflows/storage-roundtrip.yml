@@ -73,15 +73,15 @@ jobs:
             s3://cloudcraft/test/roundtrip/ \
             cloudcraft-restored/ \
             --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
-
+            
       - name: Verify restored files
         run: |
           echo "Restored files:"
           ls -lh cloudcraft-restored
 
-          cd cloudcraft-restored
-
-          sha256sum -c ../original-checksums.txt
+          sed 's#cloudcraft-test/#cloudcraft-restored/#' \
+          original-checksums.txt \
+          | sha256sum -c -
 
       - name: Final verification
         run: |
