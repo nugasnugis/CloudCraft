@@ -1,0 +1,24 @@
+name: CloudCraft Tailscale Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tailscale-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:cloudcraft-runner
+
+      - name: Check Tailscale
+        run: |
+          tailscale status
+
+      - name: Test Raspberry Pi
+        run: |
+          ping -c 4 PI_TAILSCALE_IP
