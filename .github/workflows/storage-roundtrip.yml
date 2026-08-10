@@ -1,0 +1,90 @@
+name: CloudCraft Storage Roundtrip Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  storage-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:cloudcraft-runner
+
+      - name: Check Tailscale
+        run: |
+          tailscale status
+
+      - name: Check AWS CLI
+        run: |
+          aws --version
+
+      - name: Create test data
+        run: |
+          mkdir -p cloudcraft-test
+
+          echo "CloudCraft persistence test" \
+            > cloudcraft-test/hello.txt
+
+          dd if=/dev/urandom \
+            of=cloudcraft-test/random.bin \
+            bs=1M \
+            count=5
+
+          echo "Created files:"
+          ls -lh cloudcraft-test
+
+      - name: Calculate original checksums
+        run: |
+          sha256sum cloudcraft-test/* \
+            | tee original-checksums.txt
+
+      - name: Upload to MinIO
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          aws s3 sync \
+            cloudcraft-test/ \
+            s3://cloudcraft/test/roundtrip/ \
+            --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
+
+      - name: Delete local files
+        run: |
+          rm -rf cloudcraft-test
+
+          echo "Local files after deletion:"
+          ls -la
+
+      - name: Download from MinIO
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          mkdir -p cloudcraft-restored
+
+          aws s3 sync \
+            s3://cloudcraft/test/roundtrip/ \
+            cloudcraft-restored/ \
+            --endpoint-url "${{ secrets.MINIO_ENDPOINT }}"
+
+      - name: Verify restored files
+        run: |
+          echo "Restored files:"
+          ls -lh cloudcraft-restored
+
+          cd cloudcraft-restored
+
+          sha256sum -c ../original-checksums.txt
+
+      - name: Final verification
+        run: |
+          echo "================================"
+          echo " CLOUDCRAFT STORAGE TEST PASSED"
+          echo "================================"
