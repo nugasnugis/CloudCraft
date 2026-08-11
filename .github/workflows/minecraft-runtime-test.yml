@@ -51,7 +51,8 @@ jobs:
           java -jar fabric-installer.jar \
             client \
             -dir "$HOME/.minecraft" \
-            -mcversion 1.21.11
+            -mcversion 1.21.11 \
+            -noprofile
 
       - name: Show Minecraft files
         run: |
