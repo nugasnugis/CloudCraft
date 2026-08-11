@@ -8,11 +8,11 @@ permissions:
 
 jobs:
   cloudcraft:
-    name: Minecraft Cloud Runtime
+    name: CloudCraft Minecraft Runtime
     runs-on: ubuntu-latest
 
-    # GitHub-hosted runner maksimal 6 jam.
-    # Kita set 350 menit agar ada sedikit buffer.
+    # GitHub-hosted runner has a maximum job runtime.
+    # Leave some buffer before the hard limit.
     timeout-minutes: 350
 
     steps:
@@ -23,9 +23,9 @@ jobs:
 
       - name: Check system
         run: |
-          echo "======================================"
-          echo " CloudCraft System Information"
-          echo "======================================"
+          echo "=========================================="
+          echo "       CLOUDCRAFT SYSTEM INFORMATION"
+          echo "=========================================="
 
           echo
           echo "CPU:"
@@ -66,28 +66,30 @@ jobs:
             openssl
 
           echo
-          echo "Dependencies installed."
+          echo "=========================================="
+          echo "Dependencies installed successfully."
+          echo "=========================================="
 
 
       # ============================================================
-      # 3. JAVA
+      # 3. VERIFY JAVA
       # ============================================================
 
       - name: Verify Java
         run: |
-          echo "Java:"
+          echo "Java version:"
           java -version
 
           echo
           echo "JAVA_HOME:"
-          echo "$JAVA_HOME"
+          echo "${JAVA_HOME:-not set}"
 
 
       # ============================================================
-      # 4. START VIRTUAL DISPLAY
+      # 4. START Xvfb
       # ============================================================
 
-      - name: Start Xvfb
+      - name: Start virtual display
         run: |
           echo "Starting Xvfb..."
 
@@ -104,13 +106,14 @@ jobs:
           sleep 3
 
           echo "Xvfb started."
+          echo "PID: $(cat /tmp/xvfb.pid)"
 
 
       # ============================================================
       # 5. VERIFY DISPLAY
       # ============================================================
 
-      - name: Verify display
+      - name: Check virtual display
         env:
           DISPLAY: :99
         run: |
@@ -118,18 +121,22 @@ jobs:
 
           xdpyinfo >/dev/null
 
+          echo
           echo "Virtual display is working."
 
 
       # ============================================================
-      # 6. VERIFY OPENGL
+      # 6. CHECK OPENGL
       # ============================================================
 
-      - name: Verify OpenGL
+      - name: Check OpenGL
         env:
           DISPLAY: :99
         run: |
-          echo "OpenGL information:"
+          echo "=========================================="
+          echo "             OPENGL INFORMATION"
+          echo "=========================================="
+
           glxinfo -B || true
 
 
@@ -145,7 +152,10 @@ jobs:
 
           echo "Downloading TLauncher v17..."
 
-          curl -fL \
+          curl \
+            -fL \
+            --retry 3 \
+            --retry-delay 2 \
             -o TLauncher.v17.zip \
             'https://dl1.tlauncher.org/f.php?f=files%2FTLauncher.v17.zip'
 
@@ -154,7 +164,7 @@ jobs:
           ls -lh TLauncher.v17.zip
 
           echo
-          echo "File type:"
+          echo "File information:"
           file TLauncher.v17.zip
 
 
@@ -166,10 +176,12 @@ jobs:
         run: |
           cd "$HOME/tlauncher"
 
+          echo "Extracting TLauncher..."
+
           unzip -o TLauncher.v17.zip
 
           echo
-          echo "TLauncher files:"
+          echo "TLauncher directory:"
           find . -maxdepth 3 -type f -print
 
 
@@ -177,22 +189,35 @@ jobs:
       # 9. FIND TLAUNCHER JAR
       # ============================================================
 
-      - name: Find TLauncher JAR
+      - name: Find launcher JAR
         id: launcher
         run: |
           cd "$HOME/tlauncher"
 
-          JAR=$(find . -type f -name "*.jar" | head -n 1)
+          echo "Searching for TLauncher JAR..."
+
+          JAR=$(find . -type f -name "TLauncher.jar" | head -n 1)
 
           if [ -z "$JAR" ]; then
-            echo "ERROR: TLauncher JAR not found."
+            echo "TLauncher.jar was not found."
+
+            echo
+            echo "Available JAR files:"
+            find . -type f -name "*.jar" -print
+
             exit 1
           fi
 
-          echo "TLauncher JAR:"
+          echo
+          echo "Found:"
           echo "$JAR"
 
-          echo "jar=$HOME/tlauncher/${JAR#./}" >> "$GITHUB_OUTPUT"
+          FULL_JAR="$HOME/tlauncher/${JAR#./}"
+
+          echo "Launcher JAR:"
+          echo "$FULL_JAR"
+
+          echo "jar=$FULL_JAR" >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
@@ -201,10 +226,15 @@ jobs:
 
       - name: Create VNC password
         run: |
+          echo "Generating VNC password..."
+
+          # Classic VNC/RFB authentication uses only the first
+          # 8 characters of the password.
           VNC_PASSWORD=$(openssl rand -hex 4)
 
-          echo "::add-mask::$VNC_PASSWORD"
-
+          # IMPORTANT:
+          # Do NOT mask this variable because we intentionally
+          # display it in GitHub Actions Summary for development.
           echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
 
           x11vnc \
@@ -214,7 +244,9 @@ jobs:
 
           chmod 600 /tmp/cloudcraft-vnc.pass
 
-          echo "VNC password created."
+          echo
+          echo "VNC password generated."
+          echo "Password length: ${#VNC_PASSWORD}"
 
 
       # ============================================================
@@ -235,34 +267,63 @@ jobs:
             -forever \
             -shared \
             -noxdamage \
+            -repeat \
             > /tmp/x11vnc.log 2>&1 &
 
           echo $! > /tmp/x11vnc.pid
 
           sleep 3
 
-          echo "VNC server started."
+          echo
+          echo "x11vnc started."
+          echo "PID: $(cat /tmp/x11vnc.pid)"
 
 
       # ============================================================
       # 12. VERIFY VNC
       # ============================================================
 
-      - name: Verify VNC
+      - name: Verify VNC server
         run: |
-          echo "Checking VNC port..."
+          echo "Checking VNC process..."
 
-          if ! (echo > /dev/tcp/127.0.0.1/5900) 2>/dev/null; then
-            echo "ERROR: VNC port 5900 is not available."
+          if ! kill -0 "$(cat /tmp/x11vnc.pid)" 2>/dev/null; then
+            echo "ERROR: x11vnc is not running."
 
             echo
-            echo "x11vnc log:"
+            echo "========== x11vnc LOG =========="
             cat /tmp/x11vnc.log || true
 
             exit 1
           fi
 
-          echo "VNC server is listening on 127.0.0.1:5900."
+          echo "x11vnc process is running."
+
+          echo
+          echo "Checking port 5900..."
+
+          for i in {1..10}; do
+            if (echo > /dev/tcp/127.0.0.1/5900) 2>/dev/null; then
+              echo "VNC port 5900 is available."
+              break
+            fi
+
+            echo "Waiting for VNC..."
+            sleep 1
+          done
+
+          if ! (echo > /dev/tcp/127.0.0.1/5900) 2>/dev/null; then
+            echo "ERROR: VNC port 5900 is not available."
+
+            echo
+            echo "========== x11vnc LOG =========="
+            cat /tmp/x11vnc.log || true
+
+            exit 1
+          fi
+
+          echo
+          echo "VNC server is ready."
 
 
       # ============================================================
@@ -284,55 +345,106 @@ jobs:
           sleep 3
 
           echo
-          echo "Testing noVNC HTTP server..."
-
-          curl -I http://127.0.0.1:6080/
-
-          echo
-          echo "noVNC started on port 6080."
+          echo "noVNC started."
+          echo "PID: $(cat /tmp/novnc.pid)"
 
 
       # ============================================================
-      # 14. START TLAUNCHER
+      # 14. VERIFY NOVNC
+      # ============================================================
+
+      - name: Verify noVNC
+        run: |
+          echo "Checking noVNC..."
+
+          if ! kill -0 "$(cat /tmp/novnc.pid)" 2>/dev/null; then
+            echo "ERROR: noVNC/websockify is not running."
+
+            echo
+            echo "========== noVNC LOG =========="
+            cat /tmp/novnc.log || true
+
+            exit 1
+          fi
+
+          echo "noVNC process is running."
+
+          echo
+          echo "Checking HTTP port 6080..."
+
+          for i in {1..10}; do
+            if curl -fsS http://127.0.0.1:6080/ >/dev/null; then
+              echo "noVNC HTTP server is ready."
+              break
+            fi
+
+            echo "Waiting for noVNC..."
+            sleep 1
+          done
+
+          if ! curl -fsS http://127.0.0.1:6080/ >/dev/null; then
+            echo "ERROR: noVNC HTTP server is not responding."
+
+            echo
+            echo "========== noVNC LOG =========="
+            cat /tmp/novnc.log || true
+
+            exit 1
+          fi
+
+          echo
+          echo "noVNC is ready."
+
+
+      # ============================================================
+      # 15. START TLAUNCHER
       # ============================================================
 
       - name: Start TLauncher
         env:
           DISPLAY: :99
         run: |
-          echo "Starting TLauncher..."
+          echo "=========================================="
+          echo "            STARTING TLAUNCHER"
+          echo "=========================================="
+
+          LAUNCHER="${{ steps.launcher.outputs.jar }}"
 
           echo
           echo "Launcher:"
-          echo "${{ steps.launcher.outputs.jar }}"
+          echo "$LAUNCHER"
+
+          echo
+          echo "Java:"
+          java -version
+
+          echo
+          echo "Starting TLauncher..."
 
           nohup \
             java \
-            -jar "${{ steps.launcher.outputs.jar }}" \
+            -jar "$LAUNCHER" \
             > /tmp/tlauncher.log 2>&1 &
 
           echo $! > /tmp/tlauncher.pid
+
+          sleep 10
 
           echo
           echo "TLauncher PID:"
           cat /tmp/tlauncher.pid
 
           echo
-          echo "Waiting for TLauncher..."
-
-          sleep 10
-
-          echo
-          echo "TLauncher processes:"
-          ps aux | grep -i tlauncher | grep -v grep || true
+          echo "TLauncher process:"
+          ps aux | grep -i TLauncher | grep -v grep || true
 
           echo
-          echo "Initial TLauncher log:"
+          echo "========== TLauncher LOG =========="
           cat /tmp/tlauncher.log || true
 
 
       # ============================================================
-      # 15. START CLOUDFLARED
+      # 16. INSTALL CLOUDFLARED
       # ============================================================
 
       - name: Install cloudflared
@@ -341,26 +453,58 @@ jobs:
 
           ARCH=$(dpkg --print-architecture)
 
-          echo "Architecture: $ARCH"
+          echo "System architecture:"
+          echo "$ARCH"
+
+          case "$ARCH" in
+            amd64)
+              CLOUDFLARED_ARCH="amd64"
+              ;;
+
+            arm64)
+              CLOUDFLARED_ARCH="arm64"
+              ;;
+
+            armhf)
+              CLOUDFLARED_ARCH="arm"
+              ;;
+
+            *)
+              echo "Unsupported architecture: $ARCH"
+              exit 1
+              ;;
+          esac
+
+          echo
+          echo "Cloudflared architecture:"
+          echo "$CLOUDFLARED_ARCH"
 
           curl \
             --location \
             --fail \
-            --output /tmp/cloudflared.deb \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}.deb"
+            --retry 3 \
+            -o /tmp/cloudflared.deb \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}.deb"
+
+          echo
+          echo "Installing package..."
 
           sudo dpkg -i /tmp/cloudflared.deb
 
+          echo
+          echo "Cloudflared version:"
           cloudflared version
 
 
       # ============================================================
-      # 16. START CLOUDFLARE QUICK TUNNEL
+      # 17. START CLOUDFLARE QUICK TUNNEL
       # ============================================================
 
       - name: Start Cloudflare Quick Tunnel
         run: |
-          echo "Starting Cloudflare Quick Tunnel..."
+          echo "=========================================="
+          echo "      CLOUDFLARE QUICK TUNNEL"
+          echo "=========================================="
 
           cloudflared tunnel \
             --no-autoupdate \
@@ -370,15 +514,22 @@ jobs:
           echo $! > /tmp/cloudflared.pid
 
           echo
-          echo "Waiting for Cloudflare tunnel URL..."
+          echo "cloudflared started."
+          echo "PID: $(cat /tmp/cloudflared.pid)"
+
+          echo
+          echo "Waiting for Quick Tunnel URL..."
 
           TUNNEL_URL=""
 
           for i in {1..30}; do
 
-            TUNNEL_URL=$(grep -oE 'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+            TUNNEL_URL=$(
+              grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
               /tmp/cloudflared.log \
-              | head -n 1 || true)
+              | head -n 1 || true
+            )
 
             if [ -n "$TUNNEL_URL" ]; then
               break
@@ -389,88 +540,153 @@ jobs:
           done
 
           if [ -z "$TUNNEL_URL" ]; then
+            echo
             echo "ERROR: Cloudflare Quick Tunnel URL was not found."
 
             echo
-            echo "cloudflared log:"
-            cat /tmp/cloudflared.log
+            echo "========== CLOUDFLARED LOG =========="
+            cat /tmp/cloudflared.log || true
 
             exit 1
           fi
 
+          # noVNC page
+          VNC_URL="${TUNNEL_URL}/vnc.html?autoconnect=true&resize=remote"
+
           echo "TUNNEL_URL=$TUNNEL_URL" >> "$GITHUB_ENV"
+          echo "VNC_URL=$VNC_URL" >> "$GITHUB_ENV"
 
           echo
           echo "=========================================="
-          echo " CLOUDCRAFT BROWSER URL"
+          echo "       CLOUDCRAFT BROWSER ACCESS"
           echo "=========================================="
           echo
-          echo "$TUNNEL_URL"
+          echo "noVNC:"
+          echo "$VNC_URL"
           echo
           echo "=========================================="
 
 
       # ============================================================
-      # 17. CREATE GITHUB ACTIONS SUMMARY
+      # 18. FINAL CONNECTIVITY CHECK
+      # ============================================================
+
+      - name: Verify CloudCraft services
+        run: |
+          echo "=========================================="
+          echo "        CLOUDCRAFT SERVICE STATUS"
+          echo "=========================================="
+
+          echo
+          echo "Xvfb:"
+          if kill -0 "$(cat /tmp/xvfb.pid)" 2>/dev/null; then
+            echo "RUNNING"
+          else
+            echo "NOT RUNNING"
+          fi
+
+          echo
+          echo "x11vnc:"
+          if kill -0 "$(cat /tmp/x11vnc.pid)" 2>/dev/null; then
+            echo "RUNNING"
+          else
+            echo "NOT RUNNING"
+          fi
+
+          echo
+          echo "noVNC:"
+          if kill -0 "$(cat /tmp/novnc.pid)" 2>/dev/null; then
+            echo "RUNNING"
+          else
+            echo "NOT RUNNING"
+          fi
+
+          echo
+          echo "TLauncher:"
+          if kill -0 "$(cat /tmp/tlauncher.pid)" 2>/dev/null; then
+            echo "RUNNING"
+          else
+            echo "NOT RUNNING"
+          fi
+
+          echo
+          echo "Cloudflare:"
+          if kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null; then
+            echo "RUNNING"
+          else
+            echo "NOT RUNNING"
+          fi
+
+          echo
+          echo "Local noVNC:"
+          curl -I \
+            --max-time 5 \
+            http://127.0.0.1:6080/ \
+            || true
+
+          echo
+          echo "=========================================="
+
+
+      # ============================================================
+      # 19. GITHUB ACTIONS SUMMARY
       # ============================================================
 
       - name: Show CloudCraft access information
         run: |
-          echo "# ?? CloudCraft Runtime" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "# ?? CloudCraft Runtime"
+            echo
+            echo "## ? Browser Access"
+            echo
+            echo "### ?? Open CloudCraft"
+            echo
+            echo "$VNC_URL"
+            echo
+            echo "### ? VNC Password"
+            echo
+            echo '```text'
+            echo "$VNC_PASSWORD"
+            echo '```'
+            echo
+            echo "## ?? Runtime"
+            echo
+            echo "| Component | Value |"
+            echo "|---|---|"
+            echo "| Display | :99 |"
+            echo "| Resolution | 1280x720 |"
+            echo "| VNC | 5900 |"
+            echo "| noVNC | 6080 |"
+            echo "| Renderer | llvmpipe |"
+            echo "| Java | 21 |"
+            echo "| TLauncher | v17 |"
+            echo "| Tunnel | Cloudflare Quick Tunnel |"
+            echo
+            echo "## ?? Important"
+            echo
+            echo "This Cloudflare Quick Tunnel is temporary."
+            echo "The URL changes when the workflow is restarted."
+            echo
+            echo "The VNC password is intentionally shown here for development."
+            echo "Do not share the URL and password publicly."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "## ? Browser Access" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "**Cloudflare Quick Tunnel:**" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "$TUNNEL_URL" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "Open the URL above in your browser." >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "## ? VNC Password" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "\`$VNC_PASSWORD\`" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "## ?? Display" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "- Resolution: 1280x720" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "- Display: :99" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "- VNC: 5900" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "- noVNC: 6080" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "- Renderer: llvmpipe" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "## ?? Important" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "This is a temporary Cloudflare Quick Tunnel." >> "$GITHUB_STEP_SUMMARY"
-
-          echo "The URL changes when the workflow restarts." >> "$GITHUB_STEP_SUMMARY"
+          echo
+          echo "=========================================="
+          echo "       CLOUDCRAFT READY"
+          echo "=========================================="
+          echo
+          echo "Browser URL:"
+          echo "$VNC_URL"
+          echo
+          echo "VNC Password:"
+          echo "$VNC_PASSWORD"
+          echo
+          echo "=========================================="
 
 
       # ============================================================
-      # 18. KEEP CLOUDCRAFT ALIVE
+      # 20. KEEP CLOUDCRAFT ALIVE
       # ============================================================
 
       - name: Keep CloudCraft running
@@ -479,54 +695,71 @@ jobs:
         run: |
           echo
           echo "=========================================="
-          echo " CLOUDCRAFT IS RUNNING"
+          echo "        ?? CLOUDCRAFT IS RUNNING"
           echo "=========================================="
-
           echo
-          echo "Browser:"
-          echo "$TUNNEL_URL"
-
+          echo "Open this URL:"
+          echo
+          echo "$VNC_URL"
           echo
           echo "VNC password:"
           echo "$VNC_PASSWORD"
-
-          echo
-          echo "TLauncher PID:"
-          cat /tmp/tlauncher.pid || true
-
-          echo
-          echo "Cloudflare PID:"
-          cat /tmp/cloudflared.pid || true
-
           echo
           echo "=========================================="
           echo
 
           while true; do
 
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] CloudCraft alive..."
+            echo
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] CloudCraft heartbeat"
 
             echo
             echo "TLauncher:"
+
             if [ -f /tmp/tlauncher.pid ] && \
                kill -0 "$(cat /tmp/tlauncher.pid)" 2>/dev/null; then
-              echo "RUNNING"
+              echo "  RUNNING"
             else
-              echo "NOT RUNNING"
+              echo "  NOT RUNNING"
+            fi
+
+            echo
+            echo "x11vnc:"
+
+            if [ -f /tmp/x11vnc.pid ] && \
+               kill -0 "$(cat /tmp/x11vnc.pid)" 2>/dev/null; then
+              echo "  RUNNING"
+            else
+              echo "  NOT RUNNING"
+            fi
+
+            echo
+            echo "noVNC:"
+
+            if [ -f /tmp/novnc.pid ] && \
+               kill -0 "$(cat /tmp/novnc.pid)" 2>/dev/null; then
+              echo "  RUNNING"
+            else
+              echo "  NOT RUNNING"
             fi
 
             echo
             echo "Cloudflare:"
+
             if [ -f /tmp/cloudflared.pid ] && \
                kill -0 "$(cat /tmp/cloudflared.pid)" 2>/dev/null; then
-              echo "RUNNING"
+              echo "  RUNNING"
             else
-              echo "NOT RUNNING"
+              echo "  NOT RUNNING"
             fi
 
             echo
             echo "Memory:"
             free -h
+
+            echo
+            echo "Disk:"
+            df -h /
 
             echo
             echo "------------------------------------------"
@@ -537,13 +770,15 @@ jobs:
 
 
       # ============================================================
-      # 19. CLEANUP
+      # 21. CLEANUP
       # ============================================================
 
       - name: Cleanup
         if: always()
         run: |
-          echo "Cleaning up..."
+          echo "=========================================="
+          echo "          CLOUDCRAFT CLEANUP"
+          echo "=========================================="
 
           if [ -f /tmp/tlauncher.pid ]; then
             kill "$(cat /tmp/tlauncher.pid)" 2>/dev/null || true
@@ -565,4 +800,5 @@ jobs:
             kill "$(cat /tmp/xvfb.pid)" 2>/dev/null || true
           fi
 
-          echo "Cleanup complete."
+          echo
+          echo "CloudCraft cleanup complete."
