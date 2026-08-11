@@ -1,0 +1,129 @@
+name: CloudCraft TLauncher GUI Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tlauncher-gui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Java 21 and GUI dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            openjdk-21-jre \
+            unzip \
+            xvfb \
+            x11-utils \
+            mesa-utils \
+            libgtk-3-0 \
+            libx11-xcb1 \
+            libxcb1 \
+            libxrender1 \
+            libxtst6 \
+            libxi6 \
+            libxext6 \
+            libfreetype6
+
+      - name: Verify Java
+        run: |
+          java -version
+
+      - name: Start virtual display
+        run: |
+          Xvfb :99 \
+            -screen 0 1280x720x24 \
+            -ac \
+            +extension GLX \
+            +render \
+            -noreset \
+            > /tmp/xvfb.log 2>&1 &
+
+          echo $! > /tmp/xvfb.pid
+
+          sleep 3
+
+      - name: Check virtual display
+        env:
+          DISPLAY: :99
+        run: |
+          xdpyinfo >/dev/null
+          echo "DISPLAY=$DISPLAY"
+          echo "Virtual display is working."
+
+      - name: Check OpenGL
+        env:
+          DISPLAY: :99
+        run: |
+          glxinfo -B
+
+      - name: Download TLauncher v17
+        run: |
+          mkdir -p "$HOME/tlauncher"
+
+          cd "$HOME/tlauncher"
+
+          curl -fL \
+            -o TLauncher.v17.zip \
+            'https://dl1.tlauncher.org/f.php?f=files%2FTLauncher.v17.zip'
+
+          file TLauncher.v17.zip
+          ls -lh TLauncher.v17.zip
+
+      - name: Extract TLauncher
+        run: |
+          cd "$HOME/tlauncher"
+
+          unzip -o TLauncher.v17.zip
+
+          echo "=== TLauncher files ==="
+          find . -maxdepth 2 -type f -print
+
+      - name: Find launcher JAR
+        run: |
+          echo "=== JAR files ==="
+
+          find "$HOME/tlauncher" \
+            -type f \
+            -name "*.jar" \
+            -print
+
+      - name: Test TLauncher
+        env:
+          DISPLAY: :99
+        run: |
+          cd "$HOME/tlauncher"
+
+          JAR=$(find . -type f -name "*.jar" | head -n 1)
+
+          if [ -z "$JAR" ]; then
+            echo "ERROR: No TLauncher JAR found."
+            exit 1
+          fi
+
+          echo "Using launcher:"
+          echo "$JAR"
+
+          echo "Starting TLauncher..."
+
+          timeout 30s \
+            java -jar "$JAR" \
+            > /tmp/tlauncher.log 2>&1 || true
+
+          echo "=== TLauncher log ==="
+          cat /tmp/tlauncher.log
+
+      - name: Show Xvfb log
+        if: always()
+        run: |
+          echo "=== Xvfb log ==="
+          cat /tmp/xvfb.log || true
+
+      - name: Stop virtual display
+        if: always()
+        run: |
+          if [ -f /tmp/xvfb.pid ]; then
+            kill "$(cat /tmp/xvfb.pid)" || true
+          fi
