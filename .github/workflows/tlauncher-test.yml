@@ -1,0 +1,74 @@
+name: CloudCraft TLauncher Runtime Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tlauncher-runtime:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check system
+        run: |
+          echo "=== CPU ==="
+          nproc
+
+          echo "=== RAM ==="
+          free -h
+
+          echo "=== DISK ==="
+          df -h
+
+      - name: Install Java and X11
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            openjdk-21-jre \
+            xvfb \
+            x11-utils \
+            mesa-utils
+
+      - name: Verify Java
+        run: |
+          java -version
+
+      - name: Start virtual display
+        run: |
+          Xvfb :99 \
+            -screen 0 1280x720x24 \
+            -ac \
+            +extension GLX \
+            +render \
+            -noreset \
+            > /tmp/xvfb.log 2>&1 &
+
+          echo $! > /tmp/xvfb.pid
+
+          sleep 3
+
+      - name: Check virtual display
+        env:
+          DISPLAY: :99
+        run: |
+          xdpyinfo >/dev/null
+          echo "Virtual display is working."
+
+      - name: Check OpenGL
+        env:
+          DISPLAY: :99
+        run: |
+          glxinfo -B || true
+
+      - name: Show display information
+        env:
+          DISPLAY: :99
+        run: |
+          xdpyinfo | head -40
+
+      - name: Stop virtual display
+        if: always()
+        run: |
+          if [ -f /tmp/xvfb.pid ]; then
+            kill "$(cat /tmp/xvfb.pid)" || true
+          fi
