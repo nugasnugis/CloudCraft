@@ -375,25 +375,23 @@ jobs:
       # ==================================================
 
       - name: Generate VNC password
+        id: vnc_password
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          VNC_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)"
-
-          echo "$VNC_PASSWORD" > "$HOME/cloudcraft/vnc-password.txt"
-
-          chmod 600 "$HOME/cloudcraft/vnc-password.txt"
+          VNC_PASSWORD="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)))')"
 
           echo "::add-mask::$VNC_PASSWORD"
+          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
 
           {
-            echo "## 🖥️ CloudCraft VNC"
-            echo
-            echo "**VNC password:** \`$VNC_PASSWORD\`"
-            echo
-            echo "> ⚠️ This password is generated for this runner and is visible to people who can view this workflow summary."
+            echo "### ?? VNC Access"
+            echo ""
+            echo "**Password:** \`$VNC_PASSWORD\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "VNC password generated successfully."
 
       # ==================================================
       # 14. Start x11vnc
