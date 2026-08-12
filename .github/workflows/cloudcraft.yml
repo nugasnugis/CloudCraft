@@ -400,24 +400,19 @@ jobs:
       - name: Start x11vnc
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           export DISPLAY="$DISPLAY"
 
           x11vnc \
-            -display "$DISPLAY" \
-            -rfbport 5900 \
-            -rfbauth "$HOME/cloudcraft/vnc-password.txt" \
-            -forever \
-            -shared \
-            -many \
-            -noxdamage \
-            -threads \
-            -repeat \
-            -wait 5 \
-            -defer 5 \
-            -nowf \
-            -encodings tight \
+           -display "$DISPLAY" \
+           -rfbport 5900 \
+           -rfbauth "$HOME/cloudcraft/vnc-password.txt" \
+           -forever \
+           -shared \
+           -noxdamage \
+           -repeat \
+           -noxkb \
             > "$HOME/cloudcraft/logs/x11vnc.log" 2>&1 &
 
           echo $! > "$HOME/cloudcraft/x11vnc.pid"
