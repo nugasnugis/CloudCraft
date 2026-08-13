@@ -200,7 +200,7 @@ jobs:
             --silent \
             --show-error \
             --max-time 10 \
-            "${MINIO_ENDPOINT}/minio/health/live"
+            "http://${MINIO_ENDPOINT}:9000/minio/health/live"
 
           echo
           echo "MinIO is reachable."
