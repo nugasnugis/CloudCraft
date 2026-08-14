@@ -1,211 +1,140 @@
-name: CloudCraft
+name: CloudCraft - Minecraft Cloud Client
 
 on:
   workflow_dispatch:
 
-# ============================================================
-# CLOUDCRAFT
-#
-# GitHub Actions runner
-#       ?
-# Tailscale
-#       ?
-# MinIO persistent storage
-#       ?
-# TLauncher
-#       ?
-# Minecraft
-#       ?
-# Xvfb :99
-#       ?
-# x11vnc :5900
-#       ?
-# noVNC :6080
-#       ?
-# Cloudflare Quick Tunnel
-#       ?
-# Browser
-# ============================================================
-
+# GitHub token hanya perlu read access.
 permissions:
   contents: read
 
-env:
-  # ----------------------------------------------------------
-  # Minecraft / TLauncher
-  # ----------------------------------------------------------
-
-  JAVA_HOME: /usr/lib/jvm/temurin-21-jdk-amd64
-
-  TLAUNCHER_URL: "https://dl1.tlauncher.org/f.php?f=files%2FTLauncher.v17.zip"
-
-  TLAUNCHER_DIR: "${HOME}/tlauncher"
-
-  # Keep Minecraft data in the normal location.
-  MINECRAFT_DIR: "${HOME}/.minecraft"
-
-  # ----------------------------------------------------------
-  # Virtual display
-  # ----------------------------------------------------------
-
-  DISPLAY: ":99"
-
-  SCREEN_WIDTH: "1280"
-  SCREEN_HEIGHT: "720"
-  SCREEN_DEPTH: "24"
-
-  # ----------------------------------------------------------
-  # noVNC / VNC
-  # ----------------------------------------------------------
-
-  VNC_PORT: "5900"
-  NOVNC_PORT: "6080"
-
-  # ----------------------------------------------------------
-  # CloudCraft paths
-  # ----------------------------------------------------------
-
-  CLOUDCRAFT_DIR: "${HOME}/cloudcraft"
-
-  LOG_DIR: "${HOME}/cloudcraft/logs"
-
-  # ----------------------------------------------------------
-  # MinIO
-  #
-  # These are supplied through GitHub Secrets.
-  # ----------------------------------------------------------
-
-  MINIO_BUCKET: "cloudcraft"
-
-  # ----------------------------------------------------------
-  # Tailscale
-  # ----------------------------------------------------------
-
-  TAILSCALE_TAG: "tag:cloudcraft-runner"
-
+# Jangan sampai dua CloudCraft session berjalan bersamaan.
+concurrency:
+  group: cloudcraft-main
+  cancel-in-progress: false
 
 jobs:
-
-  # ==========================================================
-  # MAIN CLOUDCRAFT JOB
-  # ==========================================================
-
   cloudcraft:
+    name: CloudCraft Minecraft Client
+    runs-on: ubuntu-24.04
 
-    runs-on: ubuntu-latest
-
-    # Don't let GitHub terminate the runner while we're doing
-    # initialization forever.
-    #
-    # This is NOT a guarantee that the runner can stay forever.
-    # GitHub-hosted runners are temporary.
+    # GitHub-hosted runner maksimal 6 jam.
     timeout-minutes: 350
+
+    env:
+      # ==========================================================
+      # CLOUDFRAFT CONFIG
+      # ==========================================================
+
+      CLOUDFRAFT_DIR: /home/runner/cloudcraft
+      CLOUDFRAFT_DATA: /home/runner/cloudcraft/data
+      CLOUDFRAFT_LOGS: /home/runner/cloudcraft/logs
+
+      # Minecraft
+      MINECRAFT_VERSION: "1.21.11"
+
+      # TLauncher v17
+      TLAUNCHER_URL: "https://dl1.tlauncher.org/f.php?f=files%2FTLauncher.v17.zip"
+
+      # Display
+      DISPLAY: ":99"
+      SCREEN_WIDTH: "1280"
+      SCREEN_HEIGHT: "720"
+      SCREEN_DEPTH: "24"
+
+      # VNC
+      VNC_PORT: "5900"
+
+      # Browser VNC
+      NOVNC_PORT: "6080"
+
+      # Cloudflare Quick Tunnel
+      CLOUDFLARE_TARGET: "http://127.0.0.1:6080"
+
+      # MinIO
+      MINIO_BUCKET: "cloudcraft"
+
+      # Change this ONLY if your MinIO is reachable through
+      # another Tailscale IP/hostname.
+      MINIO_ENDPOINT: "http://100.100.100.100:9000"
+
+      # Data inside MinIO
+      MINIO_PREFIX: "cloudcraft/"
+
+      # Backup interval
+      BACKUP_INTERVAL: "300"
+
+      # Minecraft RAM
+      # ubuntu-latest currently has enough RAM for this.
+      MINECRAFT_MIN_RAM: "2G"
+      MINECRAFT_MAX_RAM: "6G"
 
     steps:
 
-      # ========================================================
+      # ==========================================================
       # 1. CHECKOUT
-      # ========================================================
+      # ==========================================================
 
-      - name: Checkout CloudCraft
+      - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # ========================================================
-      # 2. SYSTEM INFORMATION
-      # ========================================================
+      # ==========================================================
+      # 2. CREATE ALL DIRECTORIES FIRST
+      # ==========================================================
+
+      - name: Initialize CloudCraft directories
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$CLOUDFRAFT_DIR"
+          mkdir -p "$CLOUDFRAFT_DATA"
+          mkdir -p "$CLOUDFRAFT_LOGS"
+
+          mkdir -p "$CLOUDFRAFT_DIR/tlauncher"
+          mkdir -p "$CLOUDFRAFT_DIR/.minecraft"
+          mkdir -p "$CLOUDFRAFT_DIR/backups"
+
+          touch "$CLOUDFRAFT_LOGS/cloudcraft.log"
+          touch "$CLOUDFRAFT_LOGS/xvfb.log"
+          touch "$CLOUDFRAFT_LOGS/x11vnc.log"
+          touch "$CLOUDFRAFT_LOGS/novnc.log"
+          touch "$CLOUDFRAFT_LOGS/cloudflared.log"
+          touch "$CLOUDFRAFT_LOGS/backup.log"
+
+          echo "CloudCraft directories:"
+          find "$CLOUDFRAFT_DIR" -maxdepth 2 -type d | sort
+
+
+      # ==========================================================
+      # 3. SYSTEM INFO
+      # ==========================================================
 
       - name: Check system
         shell: bash
         run: |
           set -e
 
-          echo "=========================================="
-          echo "CloudCraft system information"
-          echo "=========================================="
-
-          uname -a
-
-          echo
-          echo "CPU:"
+          echo "===== CPU ====="
           nproc
 
-          echo
-          echo "Memory:"
+          echo "===== MEMORY ====="
           free -h
 
-          echo
-          echo "Disk:"
+          echo "===== DISK ====="
           df -h /
 
-          echo
-          echo "Architecture:"
-          uname -m
-
-          echo
-          echo "=========================================="
+          echo "===== OS ====="
+          cat /etc/os-release
 
 
-      # ========================================================
-      # 3. JAVA 21
-      #
-      # We intentionally DO NOT use actions/setup-java here.
-      #
-      # Previous setup-java invocation attempted to scan the
-      # repository for Gradle files and produced:
-      #
-      # "No file in ... CloudCraft matched ..."
-      #
-      # GitHub's Ubuntu image already contains Java 21.
-      # ========================================================
-
-      - name: Setup Java 21
-        shell: bash
-        run: |
-          set -e
-
-          echo "Available Java installations:"
-          ls -la /usr/lib/jvm/ || true
-
-          # Find Java 21 automatically.
-          JAVA21="$(find /usr/lib/jvm -maxdepth 1 -type d \
-            \( -name '*21*' -o -name '*temurin-21*' \) \
-            | head -n 1)"
-
-          if [ -z "$JAVA21" ]; then
-            echo "Java 21 was not found."
-            echo "Installed Java:"
-            java -version || true
-            exit 1
-          fi
-
-          echo "Using Java:"
-          echo "$JAVA21"
-
-          echo "JAVA_HOME=$JAVA21" >> "$GITHUB_ENV"
-
-          echo "$JAVA21/bin" >> "$GITHUB_PATH"
-
-          export JAVA_HOME="$JAVA21"
-          export PATH="$JAVA_HOME/bin:$PATH"
-
-          echo
-          java -version
-
-
-      # ========================================================
-      # 4. INSTALL GUI / X11 DEPENDENCIES
+      # ==========================================================
+      # 4. INSTALL GUI + VIRTUAL DISPLAY
       #
       # IMPORTANT:
-      #
-      # We DO NOT install libgl1-mesa-glx.
-      #
-      # That package caused:
-      #
-      # Package 'libgl1-mesa-glx' has no installation candidate
-      #
-      # On current Ubuntu, use Mesa's current packages instead.
-      # ========================================================
+      # Do NOT install libgl1-mesa-glx.
+      # Ubuntu 24.04 does not provide it.
+      # ==========================================================
 
       - name: Install GUI dependencies
         shell: bash
@@ -217,191 +146,79 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xvfb \
             x11vnc \
+            openbox \
+            xterm \
+            dbus-x11 \
+            xauth \
             x11-utils \
             x11-xserver-utils \
-            xdotool \
-            openbox \
             mesa-utils \
+            libgl1 \
             libgl1-mesa-dri \
             libglx-mesa0 \
             libegl1 \
+            libegl1-mesa \
             libx11-6 \
-            libx11-xcb1 \
-            libxcb1 \
-            libxcb-xinerama0 \
-            libxcb-randr0 \
-            libxcb-render0 \
-            libxcb-shm0 \
-            libxcb-keysyms1 \
-            libxcb-image0 \
-            libxcb-icccm4 \
-            libxcb-xfixes0 \
-            libxrandr2 \
-            libxinerama1 \
-            libxcursor1 \
-            libxfixes3 \
-            libxi6 \
-            libxrender1 \
             libxext6 \
-            libxtst6 \
+            libxrender1 \
+            libxi6 \
+            libxrandr2 \
+            libxcursor1 \
+            libxinerama1 \
+            libfreetype6 \
+            libfontconfig1 \
             libasound2t64 \
-            libnss3 \
-            libatk1.0-0 \
-            libatk-bridge2.0-0 \
-            libgtk-3-0 \
-            unzip \
             curl \
             wget \
-            git \
+            unzip \
             jq \
+            openssl \
             procps \
-            net-tools \
-            ca-certificates
+            net-tools
 
-          echo
           echo "GUI dependencies installed."
 
 
-      # ========================================================
-      # 5. PREPARE CLOUDCRAFT DIRECTORY
-      # ========================================================
-
-      - name: Prepare CloudCraft directories
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p "$HOME/cloudcraft"
-          mkdir -p "$HOME/cloudcraft/logs"
-
-          mkdir -p "$HOME/.minecraft"
-          mkdir -p "$HOME/.tlauncher"
-
-          echo "Directories:"
-          find "$HOME/cloudcraft" -maxdepth 2 -type d || true
-
-
-      # ========================================================
-      # 6. TAILSCALE
-      #
-      # Required GitHub Secrets:
-      #
-      # TS_OAUTH_CLIENT_ID
-      # TS_OAUTH_SECRET
-      #
-      # OAuth credential should have:
-      #
-      # Devices ? Core ? Write
-      # Keys ? Auth Keys ? Write
-      #
-      # and tag:
-      #
-      # tag:cloudcraft-runner
-      # ========================================================
-
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:cloudcraft-runner
-
-
-      # ========================================================
-      # 7. VERIFY TAILSCALE
-      # ========================================================
-
-      - name: Verify Tailscale
-        shell: bash
-        run: |
-          set -e
-
-          echo "=========================================="
-          echo "Tailscale status"
-          echo "=========================================="
-
-          tailscale status || true
-
-          echo
-          echo "Local Tailscale IP:"
-          tailscale ip -4 || true
-
-          echo
-          echo "Tailscale DNS:"
-          tailscale dns status || true
-
-          echo
-          echo "=========================================="
-
-
-      # ========================================================
-      # 8. VERIFY MINIO
-      #
-      # MinIO endpoint should be reachable through Tailscale.
-      #
-      # GitHub Secret:
-      #
-      # MINIO_ENDPOINT
-      #
-      # Example:
-      #
-      # http://100.x.x.x:9000
+      # ==========================================================
+      # 5. INSTALL JAVA 21
       #
       # IMPORTANT:
-      # Do NOT put this directly in the YAML if it exposes
-      # your private topology.
-      # ========================================================
+      # NO cache: gradle
+      # because this repository is not a Gradle project.
+      # ==========================================================
 
-      - name: Verify MinIO connection
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+
+      - name: Verify Java
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set -e
 
-          export AWS_EC2_METADATA_DISABLED=true
-
-          echo "Testing MinIO endpoint:"
-          echo "$MINIO_ENDPOINT"
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --max-time 15 \
-            "$MINIO_ENDPOINT/minio/health/live"
-
-          echo
-          echo "MinIO is reachable."
+          java -version
+          javac -version
 
 
-      # ========================================================
-      # 9. CHECK AWS CLI
+      # ==========================================================
+      # 6. INSTALL AWS CLI
       #
-      # Current GitHub Ubuntu images already contain AWS CLI.
-      #
-      # We only install it if it is unexpectedly missing.
-      # This avoids the previous:
-      #
-      # "Package awscli has no installation candidate"
-      #
-      # problem.
-      # ========================================================
+      # Used as S3 client for MinIO.
+      # ==========================================================
 
-      - name: Verify AWS CLI
+      - name: Install AWS CLI
         shell: bash
         run: |
           set -e
 
           if command -v aws >/dev/null 2>&1; then
-            echo "AWS CLI already installed:"
+            echo "AWS CLI already installed."
             aws --version
             exit 0
           fi
-
-          echo "AWS CLI missing. Installing official AWS CLI v2..."
 
           cd "$RUNNER_TEMP"
 
@@ -413,170 +230,227 @@ jobs:
 
           unzip -q awscliv2.zip
 
-          sudo ./aws/install --update
+          sudo ./aws/install \
+            --update \
+            --bin-dir /usr/local/bin \
+            --install-dir /usr/local/aws-cli
 
           aws --version
 
 
-      # ========================================================
-      # 10. CONFIGURE AWS CLI FOR MINIO
-      # ========================================================
+      # ==========================================================
+      # 7. CONNECT TO TAILSCALE
+      #
+      # Your tag:
+      # tag:cloudcraft-runner
+      #
+      # Required GitHub secrets:
+      #
+      # TS_OAUTH_CLIENT_ID
+      # TS_OAUTH_SECRET
+      #
+      # ==========================================================
 
-      - name: Configure MinIO S3 client
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:cloudcraft-runner
+          version: latest
+
+
+      - name: Check Tailscale
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set -e
 
-          export AWS_EC2_METADATA_DISABLED=true
+          echo "===== TAILSCALE STATUS ====="
+          tailscale status
+
+          echo
+          echo "===== TAILSCALE IP ====="
+          tailscale ip -4 || true
+
+
+      # ==========================================================
+      # 8. TEST MINIO CONNECTION
+      # ==========================================================
+
+      - name: Configure MinIO credentials
+        shell: bash
+        env:
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+        run: |
+          set -e
 
           mkdir -p "$HOME/.aws"
 
-          aws configure set aws_access_key_id \
-            "$AWS_ACCESS_KEY_ID"
+          cat > "$HOME/.aws/credentials" <<EOF
+          [default]
+          aws_access_key_id = ${MINIO_ACCESS_KEY}
+          aws_secret_access_key = ${MINIO_SECRET_KEY}
+          EOF
 
-          aws configure set aws_secret_access_key \
-            "$AWS_SECRET_ACCESS_KEY"
+          cat > "$HOME/.aws/config" <<EOF
+          [default]
+          region = us-east-1
+          output = json
+          EOF
 
-          aws configure set default.region \
-            us-east-1
-
-          aws configure set default.s3.addressing_style \
-            path
-
-          aws configure set default.s3.signature_version \
-            s3v4
-
-          echo "AWS CLI configured for MinIO."
+          chmod 600 "$HOME/.aws/credentials"
 
 
-      # ========================================================
-      # 11. VERIFY BUCKET
-      # ========================================================
-
-      - name: Verify CloudCraft MinIO bucket
+      - name: Test MinIO
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set -e
 
-          export AWS_EC2_METADATA_DISABLED=true
+          echo "Testing MinIO:"
+          echo "$MINIO_ENDPOINT"
 
-          echo "Checking bucket:"
-          echo "$MINIO_BUCKET"
-
-          aws s3api head-bucket \
-            --bucket "$MINIO_BUCKET" \
+          aws s3api list-buckets \
             --endpoint-url "$MINIO_ENDPOINT"
 
-          echo "Bucket exists."
+          echo "MinIO connection OK."
 
 
-      # ========================================================
-      # 12. RESTORE PERSISTENT DATA
+      # ==========================================================
+      # 9. CREATE BUCKET IF NEEDED
+      # ==========================================================
+
+      - name: Ensure MinIO bucket exists
+        shell: bash
+        run: |
+          set -e
+
+          if aws s3api head-bucket \
+            --bucket "$MINIO_BUCKET" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            >/dev/null 2>&1; then
+
+            echo "Bucket exists: $MINIO_BUCKET"
+
+          else
+
+            echo "Creating bucket: $MINIO_BUCKET"
+
+            aws s3api create-bucket \
+              --bucket "$MINIO_BUCKET" \
+              --endpoint-url "$MINIO_ENDPOINT"
+
+          fi
+
+
+      # ==========================================================
+      # 10. RESTORE CLOUDCRAFT DATA FROM MINIO
       #
-      # Stored layout:
+      # Everything from:
       #
-      # s3://cloudcraft/
+      # s3://cloudcraft/cloudcraft/
       #
-      #   minecraft/
-      #   tlauncher/
+      # is restored into:
       #
-      # We restore both.
-      # ========================================================
+      # /home/runner/cloudcraft/data/
+      # ==========================================================
 
       - name: Restore CloudCraft data from MinIO
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set -e
 
-          export AWS_EC2_METADATA_DISABLED=true
-
-          echo "=========================================="
-          echo "Restoring Minecraft data..."
-          echo "=========================================="
+          echo "Restoring CloudCraft data..."
 
           aws s3 sync \
-            "s3://${MINIO_BUCKET}/minecraft/" \
-            "$HOME/.minecraft/" \
+            "s3://${MINIO_BUCKET}/${MINIO_PREFIX}" \
+            "$CLOUDFRAFT_DATA/" \
             --endpoint-url "$MINIO_ENDPOINT" \
             --only-show-errors
 
           echo
-          echo "=========================================="
-          echo "Restoring TLauncher data..."
-          echo "=========================================="
-
-          aws s3 sync \
-            "s3://${MINIO_BUCKET}/tlauncher/" \
-            "$HOME/.tlauncher/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --only-show-errors
-
-          echo
-          echo "Restore complete."
-
-          echo
-          echo "Minecraft files:"
-          du -sh "$HOME/.minecraft" || true
-
-          echo
-          echo "TLauncher files:"
-          du -sh "$HOME/.tlauncher" || true
+          echo "Restored files:"
+          du -sh "$CLOUDFRAFT_DATA" || true
+          find "$CLOUDFRAFT_DATA" -maxdepth 3 -type f | head -100 || true
 
 
-      # ========================================================
-      # 13. START Xvfb
-      # ========================================================
+      # ==========================================================
+      # 11. LINK PERSISTENT MINECRAFT DIRECTORY
+      #
+      # TLauncher normally expects:
+      #
+      # ~/.minecraft
+      #
+      # We store it inside CloudCraft data.
+      # ==========================================================
+
+      - name: Prepare persistent Minecraft directory
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$CLOUDFRAFT_DATA/minecraft"
+
+          rm -rf "$HOME/.minecraft"
+
+          ln -s \
+            "$CLOUDFRAFT_DATA/minecraft" \
+            "$HOME/.minecraft"
+
+          echo "Minecraft directory:"
+          readlink -f "$HOME/.minecraft"
+
+
+      # ==========================================================
+      # 12. START Xvfb
+      #
+      # FIXED:
+      # directories are already created before this step.
+      # ==========================================================
 
       - name: Start virtual display
         shell: bash
         run: |
           set -e
 
-          rm -f /tmp/.X99-lock
+          mkdir -p "$CLOUDFRAFT_DIR"
+          mkdir -p "$CLOUDFRAFT_LOGS"
 
-          Xvfb "$DISPLAY" \
+          rm -f "$CLOUDFRAFT_DIR/xvfb.pid"
+
+          export DISPLAY=:99
+
+          Xvfb :99 \
             -screen 0 "${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH}" \
             -ac \
             +extension GLX \
             +render \
             -noreset \
-            > "$LOG_DIR/xvfb.log" 2>&1 &
+            > "$CLOUDFRAFT_LOGS/xvfb.log" 2>&1 &
 
           XVFB_PID=$!
 
-          echo "$XVFB_PID" > "$CLOUDCRAFT_DIR/xvfb.pid"
+          echo "$XVFB_PID" \
+            > "$CLOUDFRAFT_DIR/xvfb.pid"
 
           sleep 3
 
           if ! kill -0 "$XVFB_PID" 2>/dev/null; then
             echo "Xvfb failed to start."
-            cat "$LOG_DIR/xvfb.log" || true
+            cat "$CLOUDFRAFT_LOGS/xvfb.log"
             exit 1
           fi
 
-          echo "Xvfb running with PID $XVFB_PID"
+          echo "Xvfb started:"
+          echo "PID=$XVFB_PID"
+          echo "DISPLAY=$DISPLAY"
 
 
-      # ========================================================
-      # 14. START OPENBOX
-      #
-      # A lightweight window manager keeps TLauncher/Minecraft
-      # windows manageable without wasting CPU.
-      # ========================================================
+      # ==========================================================
+      # 13. START OPENBOX
+      # ==========================================================
 
-      - name: Start window manager
+      - name: Start Openbox
         shell: bash
         run: |
           set -e
@@ -584,20 +458,18 @@ jobs:
           export DISPLAY=:99
 
           openbox \
-            > "$LOG_DIR/openbox.log" 2>&1 &
+            > "$CLOUDFRAFT_LOGS/openbox.log" 2>&1 &
 
-          OPENBOX_PID=$!
-
-          echo "$OPENBOX_PID" > "$CLOUDCRAFT_DIR/openbox.pid"
+          echo $! > "$CLOUDFRAFT_DIR/openbox.pid"
 
           sleep 2
 
-          echo "Openbox running."
+          echo "Openbox started."
 
 
-      # ========================================================
-      # 15. VERIFY DISPLAY
-      # ========================================================
+      # ==========================================================
+      # 14. CHECK DISPLAY
+      # ==========================================================
 
       - name: Check virtual display
         shell: bash
@@ -610,19 +482,15 @@ jobs:
 
           echo "Virtual display is working."
 
+          echo
+          echo "===== DISPLAY ====="
           xdpyinfo | grep -E \
-            'dimensions|depth of root window' || true
+            "dimensions|depth of root window"
 
 
-      # ========================================================
-      # 16. CHECK OPENGL
-      #
-      # GitHub runner normally has software rendering through
-      # Mesa/llvmpipe.
-      #
-      # This isn't a physical GPU, but it allows Minecraft to
-      # render in the virtual X display.
-      # ========================================================
+      # ==========================================================
+      # 15. CHECK OPENGL
+      # ==========================================================
 
       - name: Check OpenGL
         shell: bash
@@ -631,68 +499,65 @@ jobs:
 
           export DISPLAY=:99
 
-          glxinfo -B || true
-
-          echo
-          echo "OpenGL renderer:"
-          glxinfo -B 2>/dev/null \
-            | grep -E \
-            'OpenGL vendor|OpenGL renderer|OpenGL version' \
-            || true
+          LIBGL_ALWAYS_SOFTWARE=1 \
+            glxinfo -B || true
 
 
-      # ========================================================
-      # 17. GENERATE VNC PASSWORD
+      # ==========================================================
+      # 16. CREATE VNC PASSWORD
       #
-      # We use x11vnc's storepasswd directly.
+      # x11vnc VNC password is limited to 8 characters.
       #
-      # This avoids the previous "Broken pipe" problem.
-      # ========================================================
+      # We generate exactly 8 characters.
+      # ==========================================================
 
       - name: Generate VNC password
         shell: bash
         run: |
           set -e
 
-          VNC_PASSWORD_FILE="$CLOUDCRAFT_DIR/vnc-password.txt"
+          mkdir -p "$CLOUDFRAFT_DIR"
 
-          # Generate a 12-character password.
           VNC_PASSWORD="$(
-            tr -dc 'A-Za-z0-9' </dev/urandom \
-            | head -c 12
+            openssl rand -hex 4
           )"
 
-          # Save the plaintext password privately for the job.
-          printf '%s\n' "$VNC_PASSWORD" \
-            > "$CLOUDCRAFT_DIR/vnc-password-plain.txt"
+          echo "$VNC_PASSWORD" \
+            > "$CLOUDFRAFT_DIR/vnc-password.txt"
 
           chmod 600 \
-            "$CLOUDCRAFT_DIR/vnc-password-plain.txt"
+            "$CLOUDFRAFT_DIR/vnc-password.txt"
 
-          # Generate x11vnc-compatible password file.
           x11vnc \
             -storepasswd \
             "$VNC_PASSWORD" \
-            "$VNC_PASSWORD_FILE"
+            "$CLOUDFRAFT_DIR/vncpasswd"
 
-          chmod 600 "$VNC_PASSWORD_FILE"
+          chmod 600 \
+            "$CLOUDFRAFT_DIR/vncpasswd"
 
-          echo "VNC password generated."
+          # Put password in GitHub summary.
+          # Do NOT use ::add-mask here, otherwise the summary
+          # would hide the password we need to actually use.
+          {
+            echo "## ? CloudCraft VNC"
+            echo
+            echo "**VNC password:** \`$VNC_PASSWORD\`"
+            echo
+            echo "> Keep this password private."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "VNC password file created."
 
 
-      # ========================================================
-      # 18. START x11vnc
+      # ==========================================================
+      # 17. START x11vnc
       #
       # IMPORTANT:
+      # NO "-encodings tight"
       #
-      # We intentionally DO NOT use:
-      #
-      # -encodings tight
-      #
-      # because the installed x11vnc version rejected it.
-      #
-      # noVNC/websockify handles the browser WebSocket side.
-      # ========================================================
+      # Older x11vnc on Ubuntu rejects that option.
+      # ==========================================================
 
       - name: Start x11vnc
         shell: bash
@@ -701,257 +566,130 @@ jobs:
 
           export DISPLAY=:99
 
+          rm -f "$CLOUDFRAFT_DIR/x11vnc.pid"
+
           x11vnc \
-            -display "$DISPLAY" \
-            -rfbport "$VNC_PORT" \
-            -rfbauth "$CLOUDCRAFT_DIR/vnc-password.txt" \
+            -display :99 \
+            -rfbport 5900 \
+            -rfbauth "$CLOUDFRAFT_DIR/vncpasswd" \
             -forever \
             -shared \
             -noxdamage \
-            -noxrecord \
-            -noxfixes \
-            -cursor arrow \
             -repeat \
-            -wait 5 \
-            -defer 5 \
-            -threads \
-            > "$LOG_DIR/x11vnc.log" 2>&1 &
-
-          X11VNC_PID=$!
-
-          echo "$X11VNC_PID" \
-            > "$CLOUDCRAFT_DIR/x11vnc.pid"
+            -cursor arrow \
+            -noxfixes \
+            -noscr \
+            -bg \
+            -o "$CLOUDFRAFT_LOGS/x11vnc.log"
 
           sleep 3
 
-          if ! kill -0 "$X11VNC_PID" 2>/dev/null; then
+          if ! ss -lntp | grep -q ":5900"; then
             echo "x11vnc failed to start."
-            cat "$LOG_DIR/x11vnc.log" || true
+            cat "$CLOUDFRAFT_LOGS/x11vnc.log" || true
             exit 1
           fi
 
-          echo "x11vnc running."
-          echo "PID: $X11VNC_PID"
+          echo "x11vnc is listening on port 5900."
 
 
-      # ========================================================
-      # 19. DOWNLOAD noVNC
+      # ==========================================================
+      # 18. INSTALL / START NOVNC
       #
-      # We use the official noVNC repository.
-      #
-      # novnc_proxy is located at:
-      #
-      # utils/novnc_proxy
-      #
-      # This fixes the previous:
-      #
-      # "novnc_proxy: command not found"
-      # ========================================================
+      # We intentionally use system noVNC + websockify.
+      # ==========================================================
 
-      - name: Install noVNC
+      - name: Install noVNC and websockify
         shell: bash
         run: |
           set -e
 
-          rm -rf "$HOME/noVNC"
+          sudo apt-get update
 
-          git clone \
-            --depth 1 \
-            https://github.com/novnc/noVNC.git \
-            "$HOME/noVNC"
-
-          test -x "$HOME/noVNC/utils/novnc_proxy"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            novnc \
+            websockify
 
           echo "noVNC installed."
 
+          command -v websockify
+          test -d /usr/share/novnc
 
-      # ========================================================
-      # 20. START noVNC
-      #
-      # Browser:
-      #
-      # http://127.0.0.1:6080
-      #
-      # Cloudflare later exposes this.
-      # ========================================================
+
+      # ==========================================================
+      # 19. START noVNC
+      # ==========================================================
 
       - name: Start noVNC
         shell: bash
         run: |
           set -e
 
-          "$HOME/noVNC/utils/novnc_proxy" \
-            --vnc "127.0.0.1:${VNC_PORT}" \
-            --listen "127.0.0.1:${NOVNC_PORT}" \
-            > "$LOG_DIR/novnc.log" 2>&1 &
+          export DISPLAY=:99
+
+          rm -f "$CLOUDFRAFT_DIR/novnc.pid"
+
+          websockify \
+            --web=/usr/share/novnc \
+            --heartbeat=30 \
+            6080 \
+            127.0.0.1:5900 \
+            > "$CLOUDFRAFT_LOGS/novnc.log" 2>&1 &
 
           NOVNC_PID=$!
 
           echo "$NOVNC_PID" \
-            > "$CLOUDCRAFT_DIR/novnc.pid"
+            > "$CLOUDFRAFT_DIR/novnc.pid"
 
           sleep 3
 
           if ! kill -0 "$NOVNC_PID" 2>/dev/null; then
-            echo "noVNC failed to start."
-            cat "$LOG_DIR/novnc.log" || true
+            echo "noVNC/websockify failed."
+            cat "$CLOUDFRAFT_LOGS/novnc.log"
             exit 1
           fi
 
-          echo "noVNC running."
-          echo "PID: $NOVNC_PID"
+          if ! curl -fsS \
+            "http://127.0.0.1:6080/" \
+            >/dev/null; then
+
+            echo "noVNC HTTP server is not responding."
+            cat "$CLOUDFRAFT_LOGS/novnc.log"
+            exit 1
+          fi
+
+          echo "noVNC is running on port 6080."
 
 
-      # ========================================================
-      # 21. VERIFY noVNC
-      # ========================================================
-
-      - name: Verify noVNC is ready
-        shell: bash
-        run: |
-          set -e
-
-          echo "Checking noVNC..."
-
-          for i in $(seq 1 30); do
-
-            if curl \
-              --fail \
-              --silent \
-              --max-time 3 \
-              "http://127.0.0.1:${NOVNC_PORT}/" \
-              >/dev/null 2>&1; then
-
-              echo "noVNC is ready!"
-              exit 0
-            fi
-
-            echo "Waiting for noVNC... ($i/30)"
-
-            sleep 1
-          done
-
-          echo
-          echo "noVNC did not start correctly."
-
-          echo
-          echo "Listening ports:"
-          ss -ltnp || true
-
-          echo
-          echo "noVNC log:"
-          cat "$LOG_DIR/novnc.log" || true
-
-          echo
-          echo "x11vnc log:"
-          cat "$LOG_DIR/x11vnc.log" || true
-
-          exit 1
-
-
-      # ========================================================
-      # 22. CREATE CONNECTION SUMMARY
-      #
-      # This summary contains:
-      #
-      # - Local noVNC
-      # - VNC password
-      # - Tailscale IP
-      # ========================================================
-
-      - name: Create connection information
-        shell: bash
-        run: |
-          set -e
-
-          VNC_PASSWORD="$(
-            cat "$CLOUDCRAFT_DIR/vnc-password-plain.txt"
-          )"
-
-          TS_IP="$(
-            tailscale ip -4 2>/dev/null \
-            | head -n 1 \
-            || true
-          )"
-
-          {
-            echo "# ? CloudCraft"
-            echo
-            echo "## ?? Browser Access"
-            echo
-            echo "The local noVNC server is:"
-            echo
-            echo "\`http://127.0.0.1:${NOVNC_PORT}/\`"
-            echo
-            echo "Cloudflare URL will appear below after the tunnel starts."
-            echo
-            echo "## ? VNC Password"
-            echo
-            echo "\`$VNC_PASSWORD\`"
-            echo
-            echo "## ?? Tailscale"
-            echo
-            echo "Runner Tailscale IPv4:"
-            echo
-            echo "\`$TS_IP\`"
-            echo
-            echo "Tag:"
-            echo
-            echo "\`tag:cloudcraft-runner\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-
-      # ========================================================
-      # 23. DOWNLOAD TLAUNCHER
-      # ========================================================
+      # ==========================================================
+      # 20. DOWNLOAD TLAUNCHER v17
+      # ==========================================================
 
       - name: Download TLauncher v17
         shell: bash
         run: |
           set -e
 
-          cd "$HOME"
+          rm -rf "$CLOUDFRAFT_DIR/tlauncher"
+          mkdir -p "$CLOUDFRAFT_DIR/tlauncher"
 
-          rm -f TLauncher.v17.zip
+          cd "$CLOUDFRAFT_DIR/tlauncher"
 
-          curl \
-            --fail \
-            --location \
-            --retry 5 \
-            --retry-delay 2 \
+          curl -fL \
             "$TLAUNCHER_URL" \
-            -o TLauncher.v17.zip
+            -o TLauncher.zip
 
-          ls -lh TLauncher.v17.zip
-
-
-      # ========================================================
-      # 24. EXTRACT TLAUNCHER
-      # ========================================================
-
-      - name: Extract TLauncher
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf "$TLAUNCHER_DIR"
-
-          mkdir -p "$TLAUNCHER_DIR"
-
-          unzip -q \
-            "$HOME/TLauncher.v17.zip" \
-            -d "$TLAUNCHER_DIR"
+          unzip -o \
+            TLauncher.zip \
+            >/dev/null
 
           echo "TLauncher files:"
-          find "$TLAUNCHER_DIR" \
-            -maxdepth 3 \
-            -type f \
-            | head -n 50
+          find . -maxdepth 3 -type f | sort
 
 
-      # ========================================================
-      # 25. FIND TLAUNCHER JAR
-      # ========================================================
+      # ==========================================================
+      # 21. FIND TLAUNCHER JAR
+      # ==========================================================
 
       - name: Find TLauncher JAR
         shell: bash
@@ -959,48 +697,41 @@ jobs:
           set -e
 
           TLAUNCHER_JAR="$(
-            find "$TLAUNCHER_DIR" \
+            find "$CLOUDFRAFT_DIR/tlauncher" \
               -type f \
-              -iname '*.jar' \
-              | grep -Ei 'tlauncher' \
+              -iname "*.jar" \
               | head -n 1
           )"
 
           if [ -z "$TLAUNCHER_JAR" ]; then
-            TLAUNCHER_JAR="$(
-              find "$TLAUNCHER_DIR" \
-                -type f \
-                -iname '*.jar' \
-                | head -n 1
-            )"
-          fi
-
-          if [ -z "$TLAUNCHER_JAR" ]; then
-            echo "No TLauncher JAR found."
-            find "$TLAUNCHER_DIR" -type f
+            echo "TLauncher JAR not found."
+            find "$CLOUDFRAFT_DIR/tlauncher" -type f
             exit 1
           fi
+
+          echo "TLauncher JAR:"
+          echo "$TLAUNCHER_JAR"
 
           echo "TLAUNCHER_JAR=$TLAUNCHER_JAR" \
             >> "$GITHUB_ENV"
 
-          echo "Found:"
-          echo "$TLAUNCHER_JAR"
 
-
-      # ========================================================
-      # 26. START TLAUNCHER
+      # ==========================================================
+      # 22. START TLAUNCHER GUI
       #
-      # TLauncher itself is used as the Minecraft launcher.
+      # IMPORTANT:
+      # TLauncher remains a GUI application.
       #
-      # We intentionally don't use the external Fabric installer.
+      # You can control it through the noVNC browser.
       #
-      # Since your TLauncher already provides:
+      # Select:
       #
       # Fabric 1.21.11
       #
-      # you can select it directly in the TLauncher GUI.
-      # ========================================================
+      # directly from TLauncher.
+      #
+      # No external Fabric installer is required.
+      # ==========================================================
 
       - name: Start TLauncher
         shell: bash
@@ -1009,34 +740,31 @@ jobs:
 
           export DISPLAY=:99
 
-          cd "$TLAUNCHER_DIR"
+          cd "$CLOUDFRAFT_DIR/tlauncher"
 
           echo "Starting TLauncher:"
           echo "$TLAUNCHER_JAR"
 
-          nohup "$JAVA_HOME/bin/java" \
+          nohup java \
             -Xms512M \
-            -Xmx2048M \
+            -Xmx1G \
+            -Dprism.order=sw \
             -Djava.awt.headless=false \
             -jar "$TLAUNCHER_JAR" \
-            > "$LOG_DIR/tlauncher.log" 2>&1 &
+            > "$CLOUDFRAFT_LOGS/tlauncher.log" 2>&1 &
 
           TLAUNCHER_PID=$!
 
           echo "$TLAUNCHER_PID" \
-            > "$CLOUDCRAFT_DIR/tlauncher.pid"
-
-          echo "TLauncher PID:"
-          echo "$TLAUNCHER_PID"
+            > "$CLOUDFRAFT_DIR/tlauncher.pid"
 
           sleep 8
 
           if ! kill -0 "$TLAUNCHER_PID" 2>/dev/null; then
-            echo "TLauncher exited."
+            echo "TLauncher exited unexpectedly."
 
-            echo
-            echo "TLauncher log:"
-            cat "$LOG_DIR/tlauncher.log" || true
+            tail -200 \
+              "$CLOUDFRAFT_LOGS/tlauncher.log" || true
 
             exit 1
           fi
@@ -1044,49 +772,20 @@ jobs:
           echo "TLauncher is running."
 
 
-      # ========================================================
-      # 27. CLOUDCRAFT TUNING
+      # ==========================================================
+      # 23. START CLOUDFLARE QUICK TUNNEL
       #
-      # These JVM properties help avoid unnecessary rendering
-      # overhead in the virtual environment.
+      # Quick Tunnel:
       #
-      # The actual Minecraft JVM may be selected by TLauncher.
-      # ========================================================
-
-      - name: Prepare CloudCraft runtime
-        shell: bash
-        run: |
-          set -e
-
-          export DISPLAY=:99
-
-          # Disable screen blanking.
-          xset s off || true
-          xset -dpms || true
-          xset s noblank || true
-
-          echo "CloudCraft runtime prepared."
-
-
-      # ========================================================
-      # 28. START CLOUDflare QUICK TUNNEL
+      # https://xxxx.trycloudflare.com
       #
-      # Target:
+      # -> noVNC
       #
-      # http://127.0.0.1:6080
+      # Cloudflare officially documents:
       #
-      # IMPORTANT:
+      # cloudflared tunnel --url http://localhost:8080
       #
-      # Quick Tunnel creates a random:
-      #
-      # https://xxxxx.trycloudflare.com
-      #
-      # URL.
-      #
-      # We capture BOTH stdout and stderr.
-      #
-      # We also wait up to 90 seconds.
-      # ========================================================
+      # ==========================================================
 
       - name: Install cloudflared
         shell: bash
@@ -1094,538 +793,338 @@ jobs:
           set -e
 
           if command -v cloudflared >/dev/null 2>&1; then
-            echo "cloudflared already installed:"
+            echo "cloudflared already installed."
             cloudflared --version
             exit 0
           fi
 
-          ARCH="$(dpkg --print-architecture)"
+          curl -L \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
+            -o "$CLOUDFRAFT_DIR/cloudflared"
 
-          case "$ARCH" in
-            amd64)
-              PACKAGE_ARCH="amd64"
-              ;;
-            arm64)
-              PACKAGE_ARCH="arm64"
-              ;;
-            *)
-              echo "Unsupported architecture: $ARCH"
-              exit 1
-              ;;
-          esac
+          chmod +x \
+            "$CLOUDFRAFT_DIR/cloudflared"
 
-          cd "$RUNNER_TEMP"
+          "$CLOUDFRAFT_DIR/cloudflared" \
+            --version
 
-          curl \
-            --fail \
-            --location \
-            --retry 5 \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${PACKAGE_ARCH}.deb" \
-            -o cloudflared.deb
-
-          sudo dpkg -i cloudflared.deb
-
-          cloudflared --version
-
-
-      # ========================================================
-      # 29. START CLOUDFLARE QUICK TUNNEL
-      # ========================================================
 
       - name: Start Cloudflare Quick Tunnel
         shell: bash
         run: |
           set -e
 
-          CLOUDFLARED_LOG="$LOG_DIR/cloudflared.log"
-          CLOUDFLARE_URL_FILE="$CLOUDCRAFT_DIR/cloudflare-url.txt"
+          rm -f \
+            "$CLOUDFRAFT_DIR/cloudflare-url.txt"
 
-          rm -f "$CLOUDFLARED_LOG"
-          rm -f "$CLOUDFLARE_URL_FILE"
+          rm -f \
+            "$CLOUDFRAFT_LOGS/cloudflared.log"
 
-          echo "Checking noVNC before Cloudflare..."
+          touch \
+            "$CLOUDFRAFT_LOGS/cloudflared.log"
 
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --max-time 10 \
-            "http://127.0.0.1:${NOVNC_PORT}/" \
-            >/dev/null
-
-          echo
-          echo "noVNC is available."
-          echo
-          echo "Starting Cloudflare Quick Tunnel..."
-
-          nohup cloudflared tunnel \
+          "$CLOUDFRAFT_DIR/cloudflared" \
+            tunnel \
             --no-autoupdate \
-            --url "http://127.0.0.1:${NOVNC_PORT}" \
-            > "$CLOUDFLARED_LOG" 2>&1 &
+            --url "$CLOUDFLARE_TARGET" \
+            > "$CLOUDFRAFT_LOGS/cloudflared.log" 2>&1 &
 
           CLOUDFLARED_PID=$!
 
           echo "$CLOUDFLARED_PID" \
-            > "$CLOUDCRAFT_DIR/cloudflared.pid"
+            > "$CLOUDFRAFT_DIR/cloudflared.pid"
 
-          echo
-          echo "cloudflared PID:"
-          echo "$CLOUDFLARED_PID"
+          echo "Waiting for Cloudflare Quick Tunnel..."
 
-          FOUND_URL=""
+          CLOUDFLARE_URL=""
 
-          # Wait up to 120 seconds.
-          for i in $(seq 1 120); do
+          for i in $(seq 1 60); do
 
-            sleep 1
+            sleep 2
 
-            # If process exited, don't immediately fail.
-            # Sometimes the process can write its URL and then
-            # change state during startup.
-            if [ -f "$CLOUDFLARED_LOG" ]; then
+            # Search normal cloudflared output.
+            CLOUDFLARE_URL="$(
+              grep -Eo \
+                'https://[A-Za-z0-9.-]+\.trycloudflare\.com' \
+                "$CLOUDFRAFT_LOGS/cloudflared.log" \
+                | head -n 1 \
+                || true
+            )"
 
-              FOUND_URL="$(
-                grep \
-                  -oE \
-                  'https://[A-Za-z0-9.-]+\.trycloudflare\.com' \
-                  "$CLOUDFLARED_LOG" \
-                  | head -n 1 \
-                  || true
-              )"
-
-            fi
-
-            if [ -n "$FOUND_URL" ]; then
+            if [ -n "$CLOUDFLARE_URL" ]; then
               break
             fi
 
-            echo "Waiting for Cloudflare tunnel... ($i/120)"
+            # Make sure process is still alive.
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              echo "cloudflared exited unexpectedly."
+              cat "$CLOUDFRAFT_LOGS/cloudflared.log"
+              exit 1
+            fi
 
           done
 
-          echo
-          echo "=========================================="
-          echo "Cloudflare log"
-          echo "=========================================="
-
-          cat "$CLOUDFLARED_LOG" || true
-
-          echo
-          echo "=========================================="
-
-          if [ -z "$FOUND_URL" ]; then
-
-            echo "::error::Cloudflare Quick Tunnel URL was not detected."
-
+          if [ -z "$CLOUDFLARE_URL" ]; then
+            echo "Cloudflare Quick Tunnel URL was not found."
             echo
-            echo "cloudflared process:"
-            ps aux | grep '[c]loudflared' || true
-
+            echo "===== cloudflared log ====="
+            cat "$CLOUDFRAFT_LOGS/cloudflared.log"
             echo
-            echo "Listening ports:"
-            ss -ltnp || true
-
-            echo
-            echo "Connectivity test:"
-            curl \
-              --max-time 10 \
-              -I \
-              https://api.trycloudflare.com \
-              || true
-
             exit 1
           fi
 
-          printf '%s\n' "$FOUND_URL" \
-            > "$CLOUDFLARE_URL_FILE"
+          echo "$CLOUDFLARE_URL" \
+            > "$CLOUDFRAFT_DIR/cloudflare-url.txt"
 
           echo
-          echo "=========================================="
-          echo "?? CLOUDFLARE QUICK TUNNEL READY"
-          echo "=========================================="
+          echo "============================================"
+          echo " CLOUDCRAFT BROWSER URL"
+          echo "============================================"
           echo
-          echo "Browser URL:"
-          echo "$FOUND_URL"
+          echo "$CLOUDFLARE_URL"
           echo
-          echo "=========================================="
-
-
-      # ========================================================
-      # 30. CLOUDFLARE SUMMARY
-      # ========================================================
-
-      - name: Publish CloudCraft connection information
-        shell: bash
-        run: |
-          set -e
-
-          CLOUDFLARE_URL="$(
-            cat "$CLOUDCRAFT_DIR/cloudflare-url.txt"
-          )"
-
-          VNC_PASSWORD="$(
-            cat "$CLOUDCRAFT_DIR/vnc-password-plain.txt"
-          )"
+          echo "============================================"
 
           {
+            echo "## ? CloudCraft Browser"
             echo
-            echo "# ? CloudCraft is ONLINE"
+            echo "### noVNC"
             echo
-            echo "## ? Browser"
+            echo "[$CLOUDFLARE_URL]($CLOUDFLARE_URL)"
             echo
-            echo "### [Open CloudCraft](<${CLOUDFLARE_URL}/vnc.html>)"
+            echo "**VNC password:** check the VNC section above."
             echo
-            echo "**Cloudflare Quick Tunnel:**"
+            echo "Open the URL in your browser."
             echo
-            echo "$CLOUDFLARE_URL"
-            echo
-            echo "## ? VNC Password"
-            echo
-            echo "\`$VNC_PASSWORD\`"
-            echo
-            echo "## ? Minecraft"
-            echo
-            echo "TLauncher is running."
-            echo
-            echo "Use the TLauncher GUI to select:"
-            echo
-            echo "\`Fabric 1.21.11\`"
-            echo
-            echo "then launch Minecraft."
-            echo
-            echo "## ? Current streaming path"
-            echo
-            echo "\`Minecraft ? Xvfb ? x11vnc ? noVNC/WebSocket ? Cloudflare\`"
-            echo
-            echo "> WebRTC is NOT used yet. It will be a separate low-latency streaming layer."
+            echo "Cloudflare Quick Tunnel is being used."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo
-          echo "=========================================="
-          echo "CLOUDCRAFT READY"
-          echo "=========================================="
-          echo
-          echo "URL:"
-          echo "$CLOUDFLARE_URL/vnc.html"
-          echo
-          echo "VNC PASSWORD:"
-          echo "$VNC_PASSWORD"
-          echo
-          echo "=========================================="
 
+      # ==========================================================
+      # 24. VERIFY EVERYTHING
+      # ==========================================================
 
-      # ========================================================
-      # 31. INITIAL SAVE
-      #
-      # Save once after TLauncher starts.
-      # ========================================================
-
-      - name: Initial CloudCraft backup
+      - name: Verify CloudCraft services
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-        run: |
-          set +e
-
-          export AWS_EC2_METADATA_DISABLED=true
-
-          echo "Starting initial backup..."
-
-          aws s3 sync \
-            "$HOME/.minecraft/" \
-            "s3://${MINIO_BUCKET}/minecraft/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --only-show-errors
-
-          aws s3 sync \
-            "$HOME/.tlauncher/" \
-            "s3://${MINIO_BUCKET}/tlauncher/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --only-show-errors
-
-          echo "Initial backup complete."
-
-
-      # ========================================================
-      # 32. BACKGROUND AUTO-SAVE
-      #
-      # Every 5 minutes.
-      #
-      # NOTE:
-      #
-      # This is a best-effort backup while Minecraft is running.
-      # A live Minecraft world can change while files are being
-      # copied, so this is not equivalent to a transactional
-      # database snapshot.
-      #
-      # The final backup is done during cleanup.
-      # ========================================================
-
-      - name: Start automatic MinIO backup
-        shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set -e
 
-          export AWS_EC2_METADATA_DISABLED=true
+          echo "===== PORTS ====="
 
-          BACKUP_SCRIPT="$CLOUDCRAFT_DIR/autosave.sh"
+          ss -lntp | grep -E \
+            ":5900|:6080" \
+            || true
 
-          cat > "$BACKUP_SCRIPT" <<'SCRIPT'
+          echo
+          echo "===== PROCESSES ====="
+
+          ps aux | grep -E \
+            "Xvfb|x11vnc|websockify|cloudflared|TLauncher" \
+            | grep -v grep \
+            || true
+
+          echo
+          echo "===== CLOUDFLARE URL ====="
+
+          cat "$CLOUDFRAFT_DIR/cloudflare-url.txt"
+
+
+      # ==========================================================
+      # 25. PERIODIC MINIO BACKUP
+      #
+      # This is VERY important.
+      #
+      # GitHub-hosted runners disappear after the job ends.
+      # We therefore save continuously.
+      # ==========================================================
+
+      - name: Start continuous MinIO backup
+        shell: bash
+        run: |
+          set -e
+
+          cat > "$CLOUDFRAFT_DIR/backup-loop.sh" <<'BACKUP_SCRIPT'
           #!/usr/bin/env bash
 
-          export AWS_EC2_METADATA_DISABLED=true
+          set -u
 
           while true; do
 
-            sleep 300
-
-            echo
-            echo "=========================================="
-            echo "CloudCraft periodic backup"
-            date
-            echo "=========================================="
+            echo "[$(date -Is)] Starting CloudCraft backup..." \
+              >> "$CLOUDFRAFT_LOGS/backup.log"
 
             aws s3 sync \
-              "$HOME/.minecraft/" \
-              "s3://${MINIO_BUCKET}/minecraft/" \
+              "$CLOUDFRAFT_DATA/" \
+              "s3://${MINIO_BUCKET}/${MINIO_PREFIX}" \
               --endpoint-url "$MINIO_ENDPOINT" \
               --only-show-errors \
+              >> "$CLOUDFRAFT_LOGS/backup.log" 2>&1 \
               || true
 
-            aws s3 sync \
-              "$HOME/.tlauncher/" \
-              "s3://${MINIO_BUCKET}/tlauncher/" \
-              --endpoint-url "$MINIO_ENDPOINT" \
-              --only-show-errors \
-              || true
+            echo "[$(date -Is)] Backup finished." \
+              >> "$CLOUDFRAFT_LOGS/backup.log"
 
-            echo "Periodic backup finished."
+            sleep "$BACKUP_INTERVAL"
 
           done
-          SCRIPT
+          BACKUP_SCRIPT
 
-          chmod +x "$BACKUP_SCRIPT"
+          chmod +x \
+            "$CLOUDFRAFT_DIR/backup-loop.sh"
 
-          nohup "$BACKUP_SCRIPT" \
-            > "$LOG_DIR/autosave.log" 2>&1 &
+          nohup \
+            "$CLOUDFRAFT_DIR/backup-loop.sh" \
+            >/dev/null 2>&1 &
 
-          AUTOSAVE_PID=$!
+          BACKUP_PID=$!
 
-          echo "$AUTOSAVE_PID" \
-            > "$CLOUDCRAFT_DIR/autosave.pid"
+          echo "$BACKUP_PID" \
+            > "$CLOUDFRAFT_DIR/backup.pid"
 
-          echo "Auto-save PID:"
-          echo "$AUTOSAVE_PID"
+          echo "Continuous MinIO backup started."
+          echo "PID=$BACKUP_PID"
 
 
-      # ========================================================
-      # 33. KEEP CLOUDCRAFT ALIVE
-      #
-      # This keeps the workflow alive while you use the browser.
-      #
-      # The job timeout is 350 minutes.
-      # ========================================================
+      # ==========================================================
+      # 26. INITIAL BACKUP
+      # ==========================================================
 
-      - name: Keep CloudCraft running
+      - name: Initial MinIO backup
         shell: bash
         run: |
-          set +e
+          set -e
 
+          aws s3 sync \
+            "$CLOUDFRAFT_DATA/" \
+            "s3://${MINIO_BUCKET}/${MINIO_PREFIX}" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --only-show-errors
+
+          echo "Initial backup completed."
+
+
+      # ==========================================================
+      # 27. SHOW FINAL INFORMATION
+      # ==========================================================
+
+      - name: CloudCraft connection information
+        shell: bash
+        run: |
           echo
-          echo "=========================================="
-          echo "      CLOUDCRAFT IS RUNNING"
-          echo "=========================================="
+          echo "================================================"
+          echo "              CLOUDCRAFT READY"
+          echo "================================================"
           echo
 
-          echo "Cloudflare URL:"
-          cat "$CLOUDCRAFT_DIR/cloudflare-url.txt" || true
+          echo "Browser:"
+          cat "$CLOUDFRAFT_DIR/cloudflare-url.txt"
 
           echo
           echo "VNC password:"
-          cat "$CLOUDCRAFT_DIR/vnc-password-plain.txt" || true
+          cat "$CLOUDFRAFT_DIR/vnc-password.txt"
 
           echo
-          echo "=========================================="
+          echo "Tailscale:"
+          tailscale status || true
+
           echo
+          echo "Minecraft:"
+          echo "Minecraft $MINECRAFT_VERSION"
+          echo "Fabric is selected from TLauncher."
+
+          echo
+          echo "MinIO:"
+          echo "$MINIO_ENDPOINT"
+
+          echo
+          echo "================================================"
+
+
+      # ==========================================================
+      # 28. KEEP RUNNER ALIVE
+      #
+      # This is the actual "server" loop.
+      #
+      # GitHub will terminate the job at its execution limit.
+      # ==========================================================
+
+      - name: Keep CloudCraft alive
+        shell: bash
+        run: |
+          set +e
+
+          echo
+          echo "================================================"
+          echo " CloudCraft is running!"
+          echo "================================================"
+          echo
+          echo "Open the Cloudflare URL from the Summary."
+          echo
+          echo "Use noVNC to control TLauncher/Minecraft."
+          echo
+          echo "Backups run every ${BACKUP_INTERVAL} seconds."
+          echo
+          echo "================================================"
 
           while true; do
 
-            sleep 60
+            # Keep output alive and monitor services.
 
-            echo
-            echo "[$(date)] CloudCraft heartbeat"
+            if ! kill -0 \
+              "$(cat "$CLOUDFRAFT_DIR/xvfb.pid" 2>/dev/null)" \
+              2>/dev/null; then
 
-            # Check TLauncher.
-            if [ -f "$CLOUDCRAFT_DIR/tlauncher.pid" ]; then
-
-              PID="$(cat "$CLOUDCRAFT_DIR/tlauncher.pid")"
-
-              if kill -0 "$PID" 2>/dev/null; then
-                echo "TLauncher: RUNNING"
-              else
-                echo "TLauncher: STOPPED"
-              fi
+              echo "WARNING: Xvfb stopped."
 
             fi
 
-            # Check noVNC.
-            if curl \
-              --silent \
-              --max-time 3 \
-              "http://127.0.0.1:${NOVNC_PORT}/" \
-              >/dev/null 2>&1; then
-
-              echo "noVNC: RUNNING"
-
-            else
-
-              echo "noVNC: NOT RESPONDING"
-
+            if ! ss -lntp | grep -q ":6080"; then
+              echo "WARNING: noVNC stopped."
             fi
 
-            # Check Cloudflare.
-            if [ -f "$CLOUDCRAFT_DIR/cloudflared.pid" ]; then
-
-              PID="$(cat "$CLOUDCRAFT_DIR/cloudflared.pid")"
-
-              if kill -0 "$PID" 2>/dev/null; then
-                echo "Cloudflare: RUNNING"
-              else
-                echo "Cloudflare: STOPPED"
-              fi
-
+            if ! pgrep -f cloudflared >/dev/null 2>&1; then
+              echo "WARNING: cloudflared stopped."
             fi
+
+            sleep 30
 
           done
 
 
-      # ========================================================
-      # 34. FINAL BACKUP
+      # ==========================================================
+      # 29. FINAL BACKUP
       #
-      # Runs if the job reaches normal completion.
-      # ========================================================
+      # Usually runs only on graceful completion.
+      # The periodic backup above is the important one.
+      # ==========================================================
 
-      - name: Final CloudCraft backup
+      - name: Final MinIO backup
         if: always()
         shell: bash
-        env:
-          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
           set +e
 
-          export AWS_EC2_METADATA_DISABLED=true
-
-          echo "Performing final CloudCraft backup..."
+          echo "Final backup..."
 
           aws s3 sync \
-            "$HOME/.minecraft/" \
-            "s3://${MINIO_BUCKET}/minecraft/" \
+            "$CLOUDFRAFT_DATA/" \
+            "s3://${MINIO_BUCKET}/${MINIO_PREFIX}" \
             --endpoint-url "$MINIO_ENDPOINT" \
             --only-show-errors \
             || true
 
-          aws s3 sync \
-            "$HOME/.tlauncher/" \
-            "s3://${MINIO_BUCKET}/tlauncher/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --only-show-errors \
-            || true
-
-          echo "Final backup finished."
+          echo "Final backup attempt completed."
 
 
-      # ========================================================
-      # 35. COLLECT LOGS
-      # ========================================================
+      # ==========================================================
+      # 30. SAVE LOGS
+      # ==========================================================
 
-      - name: Collect CloudCraft logs
+      - name: Upload CloudCraft logs
         if: always()
-        shell: bash
-        run: |
-          set +e
-
-          echo
-          echo "=========================================="
-          echo "CloudCraft logs"
-          echo "=========================================="
-
-          for FILE in \
-            "$LOG_DIR/xvfb.log" \
-            "$LOG_DIR/openbox.log" \
-            "$LOG_DIR/x11vnc.log" \
-            "$LOG_DIR/novnc.log" \
-            "$LOG_DIR/tlauncher.log" \
-            "$LOG_DIR/cloudflared.log" \
-            "$LOG_DIR/autosave.log"
-          do
-
-            if [ -f "$FILE" ]; then
-
-              echo
-              echo "=========================================="
-              echo "$FILE"
-              echo "=========================================="
-
-              tail -n 100 "$FILE"
-
-            fi
-
-          done
-
-
-      # ========================================================
-      # 36. CLEANUP
-      # ========================================================
-
-      - name: Cleanup CloudCraft
-        if: always()
-        shell: bash
-        run: |
-          set +e
-
-          echo "Stopping CloudCraft processes..."
-
-          # Stop autosave.
-          if [ -f "$CLOUDCRAFT_DIR/autosave.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/autosave.pid")" 2>/dev/null || true
-          fi
-
-          # Stop Cloudflare.
-          if [ -f "$CLOUDCRAFT_DIR/cloudflared.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/cloudflared.pid")" 2>/dev/null || true
-          fi
-
-          # Stop TLauncher.
-          if [ -f "$CLOUDCRAFT_DIR/tlauncher.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/tlauncher.pid")" 2>/dev/null || true
-          fi
-
-          # Stop noVNC.
-          if [ -f "$CLOUDCRAFT_DIR/novnc.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/novnc.pid")" 2>/dev/null || true
-          fi
-
-          # Stop x11vnc.
-          if [ -f "$CLOUDCRAFT_DIR/x11vnc.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/x11vnc.pid")" 2>/dev/null || true
-          fi
-
-          # Stop Openbox.
-          if [ -f "$CLOUDCRAFT_DIR/openbox.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/openbox.pid")" 2>/dev/null || true
-          fi
-
-          # Stop Xvfb.
-          if [ -f "$CLOUDCRAFT_DIR/xvfb.pid" ]; then
-            kill "$(cat "$CLOUDCRAFT_DIR/xvfb.pid")" 2>/dev/null || true
-          fi
-
-          echo "CloudCraft cleanup complete."
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudcraft-logs
+          path: /home/runner/cloudcraft/logs/
+          if-no-files-found: ignore
+          retention-days: 3
