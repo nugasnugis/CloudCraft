@@ -10,19 +10,18 @@ permissions:
 env:
   DISPLAY: :99
   SCREEN_SIZE: 1280x720x24
-
   CLOUDCRAFT_DIR: ${{ github.workspace }}/cloudcraft
   MINIO_BUCKET: cloudcraft
-
-  # TLauncher v17
   TLAUNCHER_URL: "https://dl1.tlauncher.org/f.php?f=files%2FTLauncher.v17.zip"
-
-  # Minecraft
   MINECRAFT_VERSION: "1.21.11"
-
-  # VNC / noVNC
   VNC_PORT: "5900"
   NOVNC_PORT: "6080"
+  # AWS CLI tuning for S3-compatible MinIO.
+  AWS_RETRY_MODE: standard
+  AWS_MAX_ATTEMPTS: "10"
+  AWS_S3_MAX_CONCURRENT_REQUESTS: "4"
+  AWS_S3_MULTIPART_THRESHOLD: "64MB"
+  AWS_S3_MULTIPART_CHUNKSIZE: "16MB"
 
 jobs:
   cloudcraft:
@@ -30,485 +29,545 @@ jobs:
     timeout-minutes: 355
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Check system
-      shell: bash
-      run: |
-        set -euxo pipefail
-        uname -a
-        echo "CPU: $(nproc)"
-        free -h
-        df -h
-        lspci | grep -Ei 'vga|3d|display' || true
+      - name: Check system
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          echo "CPU: $(nproc)"
+          free -h
+          df -h
+          lspci | grep -Ei 'vga|3d|display' || true
 
-    - name: Install Java 21
-      shell: bash
-      run: |
-        set -euxo pipefail
-        sudo apt-get update
-        sudo apt-get install -y openjdk-21-jdk
-        java -version
+      - name: Install Java 21
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-21-jdk
+          java -version
 
-    - name: Install GUI dependencies
-      shell: bash
-      run: |
-        set -euxo pipefail
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          xvfb x11vnc fluxbox xterm mesa-utils \
-          libgl1-mesa-dri libglx-mesa0 libglu1-mesa \
-          libx11-6 libxext6 libxrender1 libxrandr2 libxi6 \
-          libxfixes3 libxcursor1 libxinerama1 libxdamage1 \
-          libxcomposite1 libxtst6 libxkbcommon0 libxkbcommon-x11-0 \
-          libasound2t64 libpulse0 unzip zip curl wget git \
-          ca-certificates python3 python3-venv jq
+      - name: Install GUI dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xvfb x11vnc fluxbox xterm mesa-utils \
+            libgl1-mesa-dri libglx-mesa0 libglu1-mesa \
+            libx11-6 libxext6 libxrender1 libxrandr2 libxi6 \
+            libxfixes3 libxcursor1 libxinerama1 libxdamage1 \
+            libxcomposite1 libxtst6 libxkbcommon0 libxkbcommon-x11-0 \
+            libasound2t64 libpulse0 unzip zip curl wget git \
+            ca-certificates python3 python3-venv jq
 
-    - name: Prepare CloudCraft directories
-      shell: bash
-      run: |
-        set -euxo pipefail
-        mkdir -p "$CLOUDCRAFT_DIR"/{logs,state,tlauncher,novnc,tmp}
-        touch "$CLOUDCRAFT_DIR/logs/"{xvfb,x11vnc,novnc,cloudflared}.log
+      - name: Prepare CloudCraft directories
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$CLOUDCRAFT_DIR"/{logs,state,tlauncher,novnc,tmp}
+          touch "$CLOUDCRAFT_DIR/logs/"{xvfb,x11vnc,novnc,cloudflared,fluxbox,tlauncher,backup}.log
 
-    - name: Connect to Tailscale
-      uses: tailscale/github-action@v4
-      with:
-        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-        tags: tag:cloudcraft-runner
-        version: latest
-        use-cache: true
-        log-mode: normal
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:cloudcraft-runner
+          version: latest
+          use-cache: true
+          log-mode: normal
 
-    - name: Verify Tailscale
-      shell: bash
-      run: |
-        set -euxo pipefail
-        tailscale status || true
-        tailscale ip -4 || true
+      - name: Verify Tailscale
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tailscale status || true
+          tailscale ip -4 || true
 
-    - name: Check MinIO
-      shell: bash
-      env:
-        MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-      run: |
-        set -euxo pipefail
-        curl --fail --silent --show-error --max-time 10 \
-          "$MINIO_ENDPOINT/minio/health/live"
-        echo "MinIO is reachable."
+      - name: Check MinIO
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set -euxo pipefail
+          curl --fail --silent --show-error --max-time 10 \
+            "$MINIO_ENDPOINT/minio/health/live"
+          echo "MinIO is reachable."
 
-    - name: Install AWS CLI
-      shell: bash
-      run: |
-        set -euxo pipefail
-        if command -v aws >/dev/null 2>&1; then
+      - name: Install AWS CLI
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v aws >/dev/null 2>&1; then
+            aws --version
+            exit 0
+          fi
+          cd "$CLOUDCRAFT_DIR/tmp"
+          rm -rf aws awscliv2.zip
+          curl --fail --location --retry 5 --retry-delay 2 \
+            -o awscliv2.zip \
+            "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
           aws --version
-          exit 0
-        fi
-        cd "$CLOUDCRAFT_DIR/tmp"
-        rm -rf aws awscliv2.zip
-        curl --fail --location --retry 5 --retry-delay 2 \
-          -o awscliv2.zip \
-          "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
-        unzip -q awscliv2.zip
-        sudo ./aws/install --update
-        aws --version
 
-    - name: Configure MinIO credentials
-      shell: bash
-      env:
-        MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
-        MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-      run: |
-        set -euxo pipefail
-        mkdir -p "$HOME/.aws"
-        cat > "$HOME/.aws/credentials" <<EOF
-        [default]
-        aws_access_key_id=${MINIO_ACCESS_KEY}
-        aws_secret_access_key=${MINIO_SECRET_KEY}
-        EOF
-        cat > "$HOME/.aws/config" <<EOF
-        [default]
-        region=us-east-1
-        EOF
-        chmod 600 "$HOME/.aws/credentials"
+      - name: Configure MinIO credentials
+        shell: bash
+        env:
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.aws"
+          cat > "$HOME/.aws/credentials" <<EOF
+          [default]
+          aws_access_key_id=${MINIO_ACCESS_KEY}
+          aws_secret_access_key=${MINIO_SECRET_KEY}
+          EOF
+          cat > "$HOME/.aws/config" <<EOF
+          [default]
+          region=us-east-1
+          EOF
+          chmod 600 "$HOME/.aws/credentials"
 
-    - name: Prepare MinIO bucket
-      shell: bash
-      env:
-        MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-      run: |
-        set -euxo pipefail
-        aws s3api head-bucket --bucket "$MINIO_BUCKET" \
-          --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1 || \
-        aws s3api create-bucket --bucket "$MINIO_BUCKET" \
-          --endpoint-url "$MINIO_ENDPOINT"
+      - name: Prepare MinIO bucket
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set -euxo pipefail
+          aws s3api head-bucket --bucket "$MINIO_BUCKET" \
+            --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1 || \
+          aws s3api create-bucket --bucket "$MINIO_BUCKET" \
+            --endpoint-url "$MINIO_ENDPOINT"
 
-    - name: Restore CloudCraft data
-      shell: bash
-      env:
-        MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-      run: |
-        set -euxo pipefail
-        mkdir -p "$HOME/.minecraft" "$HOME/.tlauncher"
-        echo "Looking for latest committed snapshot..."
-        SNAPSHOT=""
-        if aws s3 cp "s3://$MINIO_BUCKET/state/latest.txt" - \
-          --endpoint-url "$MINIO_ENDPOINT" \
-          --only-show-errors > "$CLOUDCRAFT_DIR/state/latest.txt" 2>/dev/null; then
-          SNAPSHOT="$(tr -d '\r\n' < "$CLOUDCRAFT_DIR/state/latest.txt")"
-        fi
+      - name: Restore CloudCraft data
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.minecraft" "$HOME/.tlauncher"
+          SNAPSHOT=""
 
-        if [ -n "$SNAPSHOT" ] && aws s3api head-object \
-          --bucket "$MINIO_BUCKET" \
-          --key "backups/$SNAPSHOT/COMPLETE" \
-          --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1; then
-          echo "Restoring committed snapshot: $SNAPSHOT"
-          aws s3 sync "s3://$MINIO_BUCKET/backups/$SNAPSHOT/minecraft/" \
-            "$HOME/.minecraft/" --endpoint-url "$MINIO_ENDPOINT" --no-progress
-          aws s3 sync "s3://$MINIO_BUCKET/backups/$SNAPSHOT/tlauncher/" \
-            "$HOME/.tlauncher/" --endpoint-url "$MINIO_ENDPOINT" --no-progress
-        else
-          echo "No committed snapshot found; using legacy prefixes."
-          aws s3 sync "s3://$MINIO_BUCKET/minecraft/" "$HOME/.minecraft/" \
-            --endpoint-url "$MINIO_ENDPOINT" --no-progress || true
-          aws s3 sync "s3://$MINIO_BUCKET/tlauncher/" "$HOME/.tlauncher/" \
-            --endpoint-url "$MINIO_ENDPOINT" --no-progress || true
-        fi
-        echo "Restore complete."
+          if aws s3 cp "s3://$MINIO_BUCKET/state/latest.txt" - \
+            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors \
+            > "$CLOUDCRAFT_DIR/state/latest.txt" 2>/dev/null; then
+            SNAPSHOT="$(tr -d '\r\n' < "$CLOUDCRAFT_DIR/state/latest.txt")"
+          fi
 
-    - name: Start virtual display
-      shell: bash
-      run: |
-        set -euxo pipefail
-        pkill Xvfb || true
-        Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -ac \
-          +extension GLX +extension RANDR +extension RENDER -noreset \
-          > "$CLOUDCRAFT_DIR/logs/xvfb.log" 2>&1 &
-        XVFB_PID=$!
-        echo "$XVFB_PID" > "$CLOUDCRAFT_DIR/xvfb.pid"
-        sleep 3
-        kill -0 "$XVFB_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/xvfb.log"; exit 1; }
-        xdpyinfo >/dev/null
+          if [ -n "$SNAPSHOT" ] && aws s3api head-object \
+            --bucket "$MINIO_BUCKET" \
+            --key "backups/$SNAPSHOT/COMPLETE" \
+            --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1; then
+            echo "Restoring committed snapshot: $SNAPSHOT"
+            aws s3 sync "s3://$MINIO_BUCKET/backups/$SNAPSHOT/minecraft/" \
+              "$HOME/.minecraft/" --endpoint-url "$MINIO_ENDPOINT" --no-progress \
+              --exclude 'assets/*' --exclude 'logs/*' --exclude 'crash-reports/*'
+            aws s3 sync "s3://$MINIO_BUCKET/backups/$SNAPSHOT/tlauncher/" \
+              "$HOME/.tlauncher/" --endpoint-url "$MINIO_ENDPOINT" --no-progress \
+              --exclude 'logs/*' --exclude 'temp/*' --exclude 'cache/*'
+          else
+            echo "No committed snapshot found; using legacy prefixes."
+            aws s3 sync "s3://$MINIO_BUCKET/minecraft/" "$HOME/.minecraft/" \
+              --endpoint-url "$MINIO_ENDPOINT" --no-progress \
+              --exclude 'assets/*' --exclude 'logs/*' --exclude 'crash-reports/*' || true
+            aws s3 sync "s3://$MINIO_BUCKET/tlauncher/" "$HOME/.tlauncher/" \
+              --endpoint-url "$MINIO_ENDPOINT" --no-progress \
+              --exclude 'logs/*' --exclude 'temp/*' --exclude 'cache/*' || true
+          fi
+          echo "Restore complete."
 
-    - name: Start Fluxbox
-      shell: bash
-      run: |
-        set -euxo pipefail
-        export DISPLAY=:99
-        fluxbox > "$CLOUDCRAFT_DIR/logs/fluxbox.log" 2>&1 &
-        echo $! > "$CLOUDCRAFT_DIR/fluxbox.pid"
-        sleep 2
+      - name: Start virtual display
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$CLOUDCRAFT_DIR/logs"
+          pkill Xvfb || true
+          Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -ac \
+            +extension GLX +extension RANDR +extension RENDER -noreset \
+            > "$CLOUDCRAFT_DIR/logs/xvfb.log" 2>&1 &
+          XVFB_PID=$!
+          echo "$XVFB_PID" > "$CLOUDCRAFT_DIR/xvfb.pid"
+          sleep 3
+          kill -0 "$XVFB_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/xvfb.log"; exit 1; }
+          xdpyinfo >/dev/null
 
-    - name: Check OpenGL
-      shell: bash
-      run: |
-        set -euxo pipefail
-        export DISPLAY=:99
-        export LIBGL_ALWAYS_SOFTWARE=1
-        glxinfo -B || true
+      - name: Start Fluxbox
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DISPLAY=:99
+          fluxbox > "$CLOUDCRAFT_DIR/logs/fluxbox.log" 2>&1 &
+          echo $! > "$CLOUDCRAFT_DIR/fluxbox.pid"
+          sleep 2
 
-    - name: Generate VNC password
-      shell: bash
-      run: |
-        set -euo pipefail
-        VNC_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8 || true)"
-        if [ "${#VNC_PASSWORD}" -ne 8 ]; then VNC_PASSWORD="$(openssl rand -hex 4)"; fi
-        printf '%s\n' "$VNC_PASSWORD" > "$CLOUDCRAFT_DIR/vnc-password.txt"
-        chmod 600 "$CLOUDCRAFT_DIR/vnc-password.txt"
-        x11vnc -storepasswd "$VNC_PASSWORD" "$CLOUDCRAFT_DIR/vnc-passwd"
-        chmod 600 "$CLOUDCRAFT_DIR/vnc-passwd"
-        echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
-        {
-          echo "## CloudCraft VNC"
-          echo "**VNC password:** \`$VNC_PASSWORD\`"
-        } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check OpenGL
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DISPLAY=:99
+          export LIBGL_ALWAYS_SOFTWARE=1
+          glxinfo -B || true
 
-    - name: Start x11vnc
-      shell: bash
-      run: |
-        set -euxo pipefail
-        export DISPLAY=:99
-        pkill x11vnc || true
-        x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" \
-          -rfbauth "$CLOUDCRAFT_DIR/vnc-passwd" -forever -shared -repeat \
-          -noxdamage -noxfixes -noxrecord -cursor arrow -wait 2 -defer 2 \
-          -threads -localhost > "$CLOUDCRAFT_DIR/logs/x11vnc.log" 2>&1 &
-        X11VNC_PID=$!
-        echo "$X11VNC_PID" > "$CLOUDCRAFT_DIR/x11vnc.pid"
-        sleep 3
-        kill -0 "$X11VNC_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/x11vnc.log"; exit 1; }
+      - name: Generate VNC password
+        shell: bash
+        run: |
+          set -euo pipefail
+          VNC_PASSWORD="$(openssl rand -hex 4)"
+          printf '%s\n' "$VNC_PASSWORD" > "$CLOUDCRAFT_DIR/vnc-password.txt"
+          chmod 600 "$CLOUDCRAFT_DIR/vnc-password.txt"
+          x11vnc -storepasswd "$VNC_PASSWORD" "$CLOUDCRAFT_DIR/vnc-passwd"
+          chmod 600 "$CLOUDCRAFT_DIR/vnc-passwd"
+          echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
+          {
+            echo "## CloudCraft VNC"
+            echo "**VNC password:** \`$VNC_PASSWORD\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Install noVNC
-      shell: bash
-      run: |
-        set -euxo pipefail
-        rm -rf "$CLOUDCRAFT_DIR/novnc"
-        git clone --depth 1 --branch v1.7.0 \
-          https://github.com/novnc/noVNC.git "$CLOUDCRAFT_DIR/novnc"
-        test -x "$CLOUDCRAFT_DIR/novnc/utils/novnc_proxy"
+      - name: Start x11vnc
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DISPLAY=:99
+          pkill x11vnc || true
+          x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" \
+            -rfbauth "$CLOUDCRAFT_DIR/vnc-passwd" \
+            -forever -shared -repeat \
+            -noxdamage -noxfixes -noxrecord -cursor arrow \
+            -wait 2 -defer 2 -threads -localhost \
+            > "$CLOUDCRAFT_DIR/logs/x11vnc.log" 2>&1 &
+          X11VNC_PID=$!
+          echo "$X11VNC_PID" > "$CLOUDCRAFT_DIR/x11vnc.pid"
+          sleep 3
+          kill -0 "$X11VNC_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/x11vnc.log"; exit 1; }
 
-    - name: Start noVNC
-      shell: bash
-      run: |
-        set -euxo pipefail
-        pkill -f "novnc_proxy.*6080" || true
-        "$CLOUDCRAFT_DIR/novnc/utils/novnc_proxy" \
-          --vnc 127.0.0.1:5900 --listen 127.0.0.1:6080 \
-          > "$CLOUDCRAFT_DIR/logs/novnc.log" 2>&1 &
-        NOVNC_PID=$!
-        echo "$NOVNC_PID" > "$CLOUDCRAFT_DIR/novnc.pid"
-        sleep 5
-        kill -0 "$NOVNC_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/novnc.log"; exit 1; }
-        for i in {1..20}; do
-          curl --silent --fail --max-time 3 http://127.0.0.1:6080/vnc.html >/dev/null && exit 0
-          sleep 1
-        done
-        cat "$CLOUDCRAFT_DIR/logs/novnc.log"
-        exit 1
+      - name: Install noVNC
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf "$CLOUDCRAFT_DIR/novnc"
+          git clone --depth 1 --branch v1.7.0 \
+            https://github.com/novnc/noVNC.git "$CLOUDCRAFT_DIR/novnc"
+          test -x "$CLOUDCRAFT_DIR/novnc/utils/novnc_proxy"
 
-    - name: Install cloudflared
-      shell: bash
-      run: |
-        set -euxo pipefail
-        curl --fail --location --retry 5 --retry-delay 2 \
-          -o "$CLOUDCRAFT_DIR/cloudflared" \
-          "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-        chmod +x "$CLOUDCRAFT_DIR/cloudflared"
-        "$CLOUDCRAFT_DIR/cloudflared" --version
+      - name: Start noVNC
+        shell: bash
+        run: |
+          set -euxo pipefail
+          pkill -f 'novnc_proxy.*6080' || true
+          "$CLOUDCRAFT_DIR/novnc/utils/novnc_proxy" \
+            --vnc 127.0.0.1:5900 --listen 127.0.0.1:6080 \
+            > "$CLOUDCRAFT_DIR/logs/novnc.log" 2>&1 &
+          NOVNC_PID=$!
+          echo "$NOVNC_PID" > "$CLOUDCRAFT_DIR/novnc.pid"
+          for i in {1..20}; do
+            if curl --silent --fail --max-time 3 \
+              http://127.0.0.1:6080/vnc.html >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$CLOUDCRAFT_DIR/logs/novnc.log"
+          exit 1
 
-    - name: Start Cloudflare Quick Tunnel
-      shell: bash
-      run: |
-        set -euo pipefail
-        rm -f "$CLOUDCRAFT_DIR/cloudflare-url.txt"
-        "$CLOUDCRAFT_DIR/cloudflared" tunnel --no-autoupdate \
-          --url http://127.0.0.1:6080 \
-          > "$CLOUDCRAFT_DIR/logs/cloudflared.log" 2>&1 &
-        CLOUDFLARED_PID=$!
-        echo "$CLOUDFLARED_PID" > "$CLOUDCRAFT_DIR/cloudflared.pid"
-        TUNNEL_URL=""
-        for i in {1..60}; do
-          if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl --fail --location --retry 5 --retry-delay 2 \
+            -o "$CLOUDCRAFT_DIR/cloudflared" \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+          chmod +x "$CLOUDCRAFT_DIR/cloudflared"
+          "$CLOUDCRAFT_DIR/cloudflared" --version
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "$CLOUDCRAFT_DIR/cloudflare-url.txt"
+          "$CLOUDCRAFT_DIR/cloudflared" tunnel --no-autoupdate \
+            --url http://127.0.0.1:6080 \
+            > "$CLOUDCRAFT_DIR/logs/cloudflared.log" 2>&1 &
+          CLOUDFLARED_PID=$!
+          echo "$CLOUDFLARED_PID" > "$CLOUDCRAFT_DIR/cloudflared.pid"
+          TUNNEL_URL=""
+          for i in {1..60}; do
+            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+              cat "$CLOUDCRAFT_DIR/logs/cloudflared.log"
+              exit 1
+            fi
+            TUNNEL_URL="$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              "$CLOUDCRAFT_DIR/logs/cloudflared.log" | head -n 1 || true)"
+            [ -n "$TUNNEL_URL" ] && break
+            sleep 2
+          done
+          if [ -z "$TUNNEL_URL" ]; then
             cat "$CLOUDCRAFT_DIR/logs/cloudflared.log"
             exit 1
           fi
-          TUNNEL_URL="$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
-            "$CLOUDCRAFT_DIR/logs/cloudflared.log" | head -n 1 || true)"
-          [ -n "$TUNNEL_URL" ] && break
-          sleep 2
-        done
-        if [ -z "$TUNNEL_URL" ]; then
-          cat "$CLOUDCRAFT_DIR/logs/cloudflared.log"
-          exit 1
-        fi
-        echo "$TUNNEL_URL" > "$CLOUDCRAFT_DIR/cloudflare-url.txt"
-        {
-          echo "## CloudCraft Browser Access"
-          echo "[OPEN CLOUDCRAFT]($TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0)"
-          echo "**Direct URL:** $TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0"
-          echo "**VNC password:** \`$VNC_PASSWORD\`"
-          echo "- Tailscale tag: \`tag:cloudcraft-runner\`"
-          echo "- Cloudflare Quick Tunnel: enabled"
-        } >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Download TLauncher v17
-      shell: bash
-      run: |
-        set -euxo pipefail
-        cd "$CLOUDCRAFT_DIR/tlauncher"
-        curl --fail --location --retry 5 --retry-delay 2 \
-          -o TLauncher.v17.zip "$TLAUNCHER_URL"
-
-    - name: Extract TLauncher
-      shell: bash
-      run: |
-        set -euxo pipefail
-        cd "$CLOUDCRAFT_DIR/tlauncher"
-        rm -rf extracted && mkdir -p extracted
-        unzip -o TLauncher.v17.zip -d extracted
-
-    - name: Find TLauncher JAR
-      shell: bash
-      run: |
-        set -euxo pipefail
-        TLAUNCHER_JAR="$(find "$CLOUDCRAFT_DIR/tlauncher/extracted" \
-          -type f -iname 'TLauncher.jar' | head -n 1)"
-        [ -n "$TLAUNCHER_JAR" ] || { find "$CLOUDCRAFT_DIR/tlauncher/extracted" -type f; exit 1; }
-        echo "TLAUNCHER_JAR=$TLAUNCHER_JAR" >> "$GITHUB_ENV"
-
-    - name: Launch TLauncher
-      shell: bash
-      run: |
-        set -euxo pipefail
-        export DISPLAY=:99
-        export LIBGL_ALWAYS_SOFTWARE=1
-        export MESA_GL_VERSION_OVERRIDE=4.5
-        export MESA_GLSL_VERSION_OVERRIDE=450
-        mkdir -p "$HOME/.tlauncher" "$HOME/.minecraft"
-        cd "$(dirname "$TLAUNCHER_JAR")"
-        java -Dfile.encoding=UTF-8 -jar "$TLAUNCHER_JAR" \
-          > "$CLOUDCRAFT_DIR/logs/tlauncher.log" 2>&1 &
-        TLAUNCHER_PID=$!
-        echo "$TLAUNCHER_PID" > "$CLOUDCRAFT_DIR/tlauncher.pid"
-        sleep 10
-        kill -0 "$TLAUNCHER_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/tlauncher.log"; exit 1; }
-
-    - name: Show TLauncher status
-      shell: bash
-      run: |
-        set +e
-        ps aux | grep -i tlauncher | grep -v grep || true
-        tail -100 "$CLOUDCRAFT_DIR/logs/tlauncher.log" || true
-
-    - name: Start safe MinIO backup loop
-      shell: bash
-      env:
-        MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-      run: |
-        set -euo pipefail
-
-        cat > "$CLOUDCRAFT_DIR/backup-once.sh" <<'BACKUP'
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        BACKUP_ROOT="s3://$MINIO_BUCKET/backups"
-        STATE_ROOT="s3://$MINIO_BUCKET/state"
-        LOCK_FILE="$CLOUDCRAFT_DIR/backup.lock"
-        STAMP="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-manual}"
-        PREFIX="$BACKUP_ROOT/$STAMP"
-
-        exec 9>"$LOCK_FILE"
-        if ! flock -n 9; then
-          echo "[$(date -u)] Backup already running; skipping."
-          exit 0
-        fi
-
-        echo "[$(date -u)] Starting backup $STAMP"
-        sync
-
-        # Pass 1: upload the current filesystem state.
-        aws s3 sync "$HOME/.minecraft/" "$PREFIX/minecraft/" \
-          --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors
-        aws s3 sync "$HOME/.tlauncher/" "$PREFIX/tlauncher/" \
-          --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors
-
-        # Pass 2 after a short quiet window. This catches files changed
-        # while the first pass was running. The --delete applies only to
-        # this newly created snapshot.
-        sync
-        sleep 3
-        aws s3 sync "$HOME/.minecraft/" "$PREFIX/minecraft/" \
-          --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors --delete
-        aws s3 sync "$HOME/.tlauncher/" "$PREFIX/tlauncher/" \
-          --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors --delete
-
-        # Commit marker: restore only snapshots that have COMPLETE.
-        printf '%s\n' "$STAMP" | aws s3 cp - "$PREFIX/COMPLETE" \
-          --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
-        printf '%s\n' "$STAMP" | aws s3 cp - "$STATE_ROOT/latest.txt" \
-          --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
-
-        # Keep only the newest two committed snapshots.
-        mapfile -t SNAPSHOTS < <(
-          aws s3api list-objects-v2 --bucket "$MINIO_BUCKET" \
-            --prefix "backups/" --delimiter / \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --query 'CommonPrefixes[].Prefix' --output text 2>/dev/null \
-          | tr '\t' '\n' | sed -E 's#^backups/##; s#/$##' \
-          | grep -E '^[0-9]{8}T[0-9]{6}Z-' | sort -r || true
-        )
-        if [ "${#SNAPSHOTS[@]}" -gt 2 ]; then
-          for OLD in "${SNAPSHOTS[@]:2}"; do
-            aws s3 rm "s3://$MINIO_BUCKET/backups/$OLD/" --recursive \
-              --endpoint-url "$MINIO_ENDPOINT" --only-show-errors || true
-          done
-        fi
-        echo "[$(date -u)] Backup $STAMP committed successfully."
-        BACKUP
-
-        chmod +x "$CLOUDCRAFT_DIR/backup-once.sh"
-
-        cat > "$CLOUDCRAFT_DIR/backup-loop.sh" <<'LOOP'
-        #!/usr/bin/env bash
-        set -u
-        while true; do
+          printf '%s\n' "$TUNNEL_URL" > "$CLOUDCRAFT_DIR/cloudflare-url.txt"
           {
-            echo "===== CloudCraft periodic backup $(date -u) ====="
-            "$CLOUDCRAFT_DIR/backup-once.sh"
-          } >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
-          sleep 300
-        done
-        LOOP
-        chmod +x "$CLOUDCRAFT_DIR/backup-loop.sh"
-        nohup "$CLOUDCRAFT_DIR/backup-loop.sh" >/dev/null 2>&1 &
-        BACKUP_PID=$!
-        echo "$BACKUP_PID" > "$CLOUDCRAFT_DIR/backup.pid"
+            echo "## CloudCraft Browser Access"
+            echo "[OPEN CLOUDCRAFT]($TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0)"
+            echo "**Direct URL:** $TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0"
+            echo "**VNC password:** \`$VNC_PASSWORD\`"
+            echo "- Tailscale tag: \`tag:cloudcraft-runner\`"
+            echo "- Cloudflare Quick Tunnel: enabled"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-        # Immediate first V2 snapshot.
-        "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
-        echo "Backup loop PID: $BACKUP_PID"
+      - name: Download TLauncher v17
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$CLOUDCRAFT_DIR/tlauncher"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            -o TLauncher.v17.zip "$TLAUNCHER_URL"
 
-    - name: CloudCraft ready
-      shell: bash
-      run: |
-        set -euo pipefail
-        TUNNEL_URL="$(cat "$CLOUDCRAFT_DIR/cloudflare-url.txt")"
-        {
-          echo "# CloudCraft is READY"
-          echo "## Browser"
-          echo "[OPEN CLOUDCRAFT]($TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0)"
-          echo ""
-          echo "**VNC password:** \`$VNC_PASSWORD\`"
-          echo ""
-          echo "## Persistence"
-          echo "- MinIO committed snapshots"
-          echo "- COMPLETE marker before restore"
-          echo "- Periodic backup every 5 minutes"
-          echo "- Two snapshots retained"
-          echo ""
-          echo "## Minecraft"
-          echo "Use TLauncher to select Minecraft **1.21.11 + Fabric**."
-        } >> "$GITHUB_STEP_SUMMARY"
+      - name: Extract TLauncher
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$CLOUDCRAFT_DIR/tlauncher"
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -o TLauncher.v17.zip -d extracted
 
-    - name: Keep CloudCraft alive
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Browser:"
-        cat "$CLOUDCRAFT_DIR/cloudflare-url.txt"
-        echo "VNC password: $VNC_PASSWORD"
-        trap '"$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true' EXIT INT TERM
-        while true; do
-          echo "===== $(date) ====="
-          ps -eo pid,comm,%cpu,%mem | grep -E 'java|Xvfb|x11vnc|cloudflared' | grep -v grep || true
-          free -h
-          df -h "$HOME"
-          tail -5 "$CLOUDCRAFT_DIR/logs/backup.log" 2>/dev/null || true
-          sleep 60
-        done
+      - name: Find TLauncher JAR
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TLAUNCHER_JAR="$(find "$CLOUDCRAFT_DIR/tlauncher/extracted" \
+            -type f -iname 'TLauncher.jar' | head -n 1)"
+          [ -n "$TLAUNCHER_JAR" ] || { find "$CLOUDCRAFT_DIR/tlauncher/extracted" -type f; exit 1; }
+          echo "TLAUNCHER_JAR=$TLAUNCHER_JAR" >> "$GITHUB_ENV"
 
-    - name: Final safe MinIO backup
-      if: always()
-      shell: bash
-      env:
-        MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
-      run: |
-        set +e
-        if [ -x "$CLOUDCRAFT_DIR/backup-once.sh" ]; then
+      - name: Launch TLauncher
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export DISPLAY=:99
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export MESA_GL_VERSION_OVERRIDE=4.5
+          export MESA_GLSL_VERSION_OVERRIDE=450
+          mkdir -p "$HOME/.tlauncher" "$HOME/.minecraft"
+          cd "$(dirname "$TLAUNCHER_JAR")"
+          java -Dfile.encoding=UTF-8 -jar "$TLAUNCHER_JAR" \
+            > "$CLOUDCRAFT_DIR/logs/tlauncher.log" 2>&1 &
+          TLAUNCHER_PID=$!
+          echo "$TLAUNCHER_PID" > "$CLOUDCRAFT_DIR/tlauncher.pid"
+          sleep 10
+          kill -0 "$TLAUNCHER_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/tlauncher.log"; exit 1; }
+
+      - name: Show TLauncher status
+        shell: bash
+        run: |
+          set +e
+          ps aux | grep -i tlauncher | grep -v grep || true
+          tail -100 "$CLOUDCRAFT_DIR/logs/tlauncher.log" || true
+
+      - name: Prepare safe MinIO backup script
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set -euxo pipefail
+          cat > "$CLOUDCRAFT_DIR/backup-once.sh" <<'BACKUP'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          BACKUP_ROOT="s3://$MINIO_BUCKET/backups"
+          STATE_ROOT="s3://$MINIO_BUCKET/state"
+          LOCK_FILE="$CLOUDCRAFT_DIR/backup.lock"
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-manual}"
+          PREFIX="$BACKUP_ROOT/$STAMP"
+
+          exec 9>"$LOCK_FILE"
+          if ! flock -n 9; then
+            echo "[$(date -u)] Backup already running; skipping."
+            exit 0
+          fi
+
+          sync
+          echo "[$(date -u)] Starting backup $STAMP"
+
+          s3_sync_retry() {
+            local src="$1"
+            local dst="$2"
+            shift 2
+            local attempt
+            for attempt in 1 2 3 4; do
+              echo "Upload attempt $attempt: $src -> $dst"
+              if aws s3 sync "$src" "$dst" \
+                --endpoint-url "$MINIO_ENDPOINT" \
+                --no-progress --only-show-errors \
+                --no-follow-symlinks \
+                --exclude 'assets/*' \
+                --exclude 'logs/*' \
+                --exclude 'crash-reports/*' \
+                "$@"; then
+                return 0
+              fi
+              echo "Upload attempt $attempt failed; waiting before retry."
+              sleep $((attempt * 5))
+            done
+            echo "Upload failed after retries: $src"
+            return 1
+          }
+
+          # Minecraft assets are a disposable cache and were the files
+          # producing MinIO IncompleteBody errors in the failed run.
+          # They are intentionally NOT part of persistence snapshots.
+          s3_sync_retry "$HOME/.minecraft/" "$PREFIX/minecraft/"
+
+          for attempt in 1 2 3 4; do
+            if aws s3 sync "$HOME/.tlauncher/" "$PREFIX/tlauncher/" \
+              --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors \
+              --no-follow-symlinks \
+              --exclude 'logs/*' --exclude 'temp/*' --exclude 'cache/*'; then
+              break
+            fi
+            [ "$attempt" -eq 4 ] && exit 1
+            sleep $((attempt * 5))
+          done
+
+          sync
+          sleep 3
+
+          s3_sync_retry "$HOME/.minecraft/" "$PREFIX/minecraft/" --delete
+
+          for attempt in 1 2 3 4; do
+            if aws s3 sync "$HOME/.tlauncher/" "$PREFIX/tlauncher/" \
+              --endpoint-url "$MINIO_ENDPOINT" --no-progress --only-show-errors \
+              --no-follow-symlinks --delete \
+              --exclude 'logs/*' --exclude 'temp/*' --exclude 'cache/*'; then
+              break
+            fi
+            [ "$attempt" -eq 4 ] && exit 1
+            sleep $((attempt * 5))
+          done
+
+          # Use real files for markers instead of stdin streaming. This
+          # avoids another source of Content-Length/IncompleteBody errors.
+          MARKER="$CLOUDCRAFT_DIR/state/COMPLETE"
+          printf '%s\n' "$STAMP" > "$MARKER"
+          aws s3 cp "$MARKER" "$PREFIX/COMPLETE" \
+            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
+          aws s3 cp "$MARKER" "$STATE_ROOT/latest.txt" \
+            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
+
+          mapfile -t SNAPSHOTS < <(
+            aws s3api list-objects-v2 --bucket "$MINIO_BUCKET" \
+              --prefix 'backups/' --delimiter / \
+              --endpoint-url "$MINIO_ENDPOINT" \
+              --query 'CommonPrefixes[].Prefix' --output text 2>/dev/null \
+            | tr '\t' '\n' \
+            | sed -E 's#^backups/##; s#/$##' \
+            | grep -E '^[0-9]{8}T[0-9]{6}Z-' \
+            | sort -r || true
+          )
+
+          if [ "${#SNAPSHOTS[@]}" -gt 2 ]; then
+            for OLD in "${SNAPSHOTS[@]:2}"; do
+              aws s3 rm "s3://$MINIO_BUCKET/backups/$OLD/" --recursive \
+                --endpoint-url "$MINIO_ENDPOINT" --only-show-errors || true
+            done
+          fi
+
+          echo "[$(date -u)] Backup $STAMP committed successfully."
+          BACKUP
+          chmod +x "$CLOUDCRAFT_DIR/backup-once.sh"
+
+      - name: Start periodic MinIO backup loop
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          cat > "$CLOUDCRAFT_DIR/backup-loop.sh" <<'LOOP'
+          #!/usr/bin/env bash
+          set -u
+          while true; do
+            {
+              echo "===== CloudCraft periodic backup $(date -u) ====="
+              "$CLOUDCRAFT_DIR/backup-once.sh"
+            } >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
+            sleep 300
+          done
+          LOOP
+          chmod +x "$CLOUDCRAFT_DIR/backup-loop.sh"
+          nohup "$CLOUDCRAFT_DIR/backup-loop.sh" >/dev/null 2>&1 &
+          BACKUP_PID=$!
+          echo "$BACKUP_PID" > "$CLOUDCRAFT_DIR/backup.pid"
           "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
-        fi
+          echo "Backup loop PID: $BACKUP_PID"
 
-    - name: Show CloudCraft logs
-      if: always()
-      shell: bash
-      run: |
-        set +e
-        echo "===== Xvfb ====="; cat "$CLOUDCRAFT_DIR/logs/xvfb.log" || true
-        echo "===== x11vnc ====="; tail -100 "$CLOUDCRAFT_DIR/logs/x11vnc.log" || true
-        echo "===== noVNC ====="; tail -100 "$CLOUDCRAFT_DIR/logs/novnc.log" || true
-        echo "===== Cloudflare ====="; tail -100 "$CLOUDCRAFT_DIR/logs/cloudflared.log" || true
-        echo "===== TLauncher ====="; tail -100 "$CLOUDCRAFT_DIR/logs/tlauncher.log" || true
-        echo "===== Backup ====="; tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" || true
+      - name: CloudCraft ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          TUNNEL_URL="$(cat "$CLOUDCRAFT_DIR/cloudflare-url.txt")"
+          {
+            echo "# CloudCraft is READY"
+            echo "## Browser"
+            echo "[OPEN CLOUDCRAFT]($TUNNEL_URL/vnc.html?autoconnect=1&resize=scale&view_only=0)"
+            echo ""
+            echo "**VNC password:** \`$VNC_PASSWORD\`"
+            echo ""
+            echo "## Persistence"
+            echo "- MinIO committed snapshots"
+            echo "- COMPLETE marker before restore"
+            echo "- Periodic backup every 5 minutes"
+            echo "- Two snapshots retained"
+            echo "- Minecraft assets excluded (cache; avoids MinIO IncompleteBody errors)"
+            echo ""
+            echo "## Minecraft"
+            echo "Use TLauncher to manually select Minecraft **1.21.11 + Fabric**."
+            echo ""
+            echo "## Network"
+            echo "- Tailscale: \`tag:cloudcraft-runner\`"
+            echo "- Cloudflare Quick Tunnel: enabled"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep CloudCraft alive
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Browser: $(cat "$CLOUDCRAFT_DIR/cloudflare-url.txt")"
+          echo "VNC password: $VNC_PASSWORD"
+          trap '"$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true' EXIT INT TERM
+          while true; do
+            echo "===== $(date) ====="
+            ps -eo pid,comm,%cpu,%mem | grep -E 'java|Xvfb|x11vnc|cloudflared' | grep -v grep || true
+            free -h
+            df -h "$HOME"
+            tail -5 "$CLOUDCRAFT_DIR/logs/backup.log" 2>/dev/null || true
+            sleep 60
+          done
+
+      - name: Final safe MinIO backup
+        if: always()
+        shell: bash
+        env:
+          MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          set +e
+          if [ -x "$CLOUDCRAFT_DIR/backup-once.sh" ]; then
+            "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
+          fi
+
+      - name: Show CloudCraft logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          echo "===== Xvfb ====="; cat "$CLOUDCRAFT_DIR/logs/xvfb.log" || true
+          echo "===== x11vnc ====="; tail -100 "$CLOUDCRAFT_DIR/logs/x11vnc.log" || true
+          echo "===== noVNC ====="; tail -100 "$CLOUDCRAFT_DIR/logs/novnc.log" || true
+          echo "===== Cloudflare ====="; tail -100 "$CLOUDCRAFT_DIR/logs/cloudflared.log" || true
+          echo "===== TLauncher ====="; tail -100 "$CLOUDCRAFT_DIR/logs/tlauncher.log" || true
+          echo "===== Backup ====="; tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" || true
