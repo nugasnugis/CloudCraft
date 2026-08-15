@@ -386,23 +386,54 @@ jobs:
         mkdir -p "$HOME/.minecraft"
         mkdir -p "$HOME/.tlauncher"
 
-        echo "Restoring Minecraft data..."
+        echo "Looking for the latest COMPLETE CloudCraft snapshot..."
 
-        aws s3 sync \
-          "s3://$MINIO_BUCKET/minecraft/" \
-          "$HOME/.minecraft/" \
+        SNAPSHOT=""
+        if aws s3 cp \
+          "s3://$MINIO_BUCKET/state/latest.txt" - \
           --endpoint-url "$MINIO_ENDPOINT" \
-          --no-progress \
-          || true
+          --only-show-errors \
+          > "$CLOUDCRAFT_DIR/state/latest.txt" 2>/dev/null; then
+          SNAPSHOT="$(tr -d '\r\n' < "$CLOUDCRAFT_DIR/state/latest.txt")"
+        fi
 
-        echo "Restoring TLauncher data..."
-
-        aws s3 sync \
-          "s3://$MINIO_BUCKET/tlauncher/" \
-          "$HOME/.tlauncher/" \
+        if [ -n "$SNAPSHOT" ] && aws s3api head-object \
+          --bucket "$MINIO_BUCKET" \
+          --key "backups/$SNAPSHOT/COMPLETE" \
           --endpoint-url "$MINIO_ENDPOINT" \
-          --no-progress \
-          || true
+          >/dev/null 2>&1; then
+
+          echo "Restoring committed snapshot: $SNAPSHOT"
+
+          aws s3 sync \
+            "s3://$MINIO_BUCKET/backups/$SNAPSHOT/minecraft/" \
+            "$HOME/.minecraft/" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --no-progress
+
+          aws s3 sync \
+            "s3://$MINIO_BUCKET/backups/$SNAPSHOT/tlauncher/" \
+            "$HOME/.tlauncher/" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --no-progress
+
+        else
+          echo "No committed snapshot found; using legacy MinIO prefixes."
+
+          aws s3 sync \
+            "s3://$MINIO_BUCKET/minecraft/" \
+            "$HOME/.minecraft/" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --no-progress \
+            || true
+
+          aws s3 sync \
+            "s3://$MINIO_BUCKET/tlauncher/" \
+            "$HOME/.tlauncher/" \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --no-progress \
+            || true
+        fi
 
         echo
         echo "Restore complete."
@@ -751,7 +782,6 @@ jobs:
     # It generates a random:
     #
     # https://xxxx.trycloudflare.com
-    #
     # ============================================================
 
     - name: Start Cloudflare Quick Tunnel
@@ -783,13 +813,13 @@ jobs:
             exit 1
           fi
 
-          TUNNEL_URL="$(
+          TUNNEL_URL="$((
             grep -Eo \
-              'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' \
+              'https://[a-zA-Z0-9.-]+\\.trycloudflare\\.com' \
               "$CLOUDCRAFT_DIR/logs/cloudflared.log" \
               | head -n 1 \
               || true
-          )"
+          ))"
 
           if [ -n "$TUNNEL_URL" ]; then
             break
@@ -809,6 +839,7 @@ jobs:
           cat "$CLOUDCRAFT_DIR/logs/cloudflared.log"
 
           exit 1
+
         fi
 
         echo "$TUNNEL_URL" > "$CLOUDCRAFT_DIR/cloudflare-url.txt"
@@ -907,12 +938,12 @@ jobs:
       run: |
         set -euxo pipefail
 
-        TLAUNCHER_JAR="$(
+        TLAUNCHER_JAR="$({
           find "$CLOUDCRAFT_DIR/tlauncher/extracted" \
             -type f \
             -iname 'TLauncher.jar' \
             | head -n 1
-        )"
+        })"
 
         if [ -z "$TLAUNCHER_JAR" ]; then
           echo "TLauncher.jar not found."
@@ -1009,69 +1040,165 @@ jobs:
 
 
     # ============================================================
-    # 29. START PERIODIC MINIO BACKUP
+    # 29. START SAFE PERIODIC MINIO BACKUP
     #
-    # Every 5 minutes:
+    # V2.1 persistence design:
     #
-    # .minecraft
-    # .tlauncher
+    # 1. Each backup is written to its own S3 snapshot prefix.
+    # 2. Minecraft + TLauncher are synced twice so files that are
+    #    being written during the first pass get a second chance.
+    # 3. A COMPLETE marker is written only after the second pass.
+    # 4. latest.txt is updated only after COMPLETE exists.
+    # 5. A lock prevents overlapping backups.
+    # 6. Only the two newest committed snapshots are retained.
     #
-    # gets synchronized to MinIO.
-    #
-    # This is intentionally best-effort.
+    # We keep the existing live prefixes (minecraft/ and tlauncher/)
+    # as a compatibility fallback for the data already stored there.
     # ============================================================
 
-    - name: Start MinIO backup loop
+    - name: Start safe MinIO backup loop
       shell: bash
       env:
         MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
       run: |
         set -euo pipefail
 
-        cat > "$CLOUDCRAFT_DIR/backup-loop.sh" <<'BACKUP'
+        cat > "$CLOUDCRAFT_DIR/backup-once.sh" <<'BACKUP'
         #!/usr/bin/env bash
-
         set -euo pipefail
 
+        BACKUP_ROOT="s3://$MINIO_BUCKET/backups"
+        STATE_ROOT="s3://$MINIO_BUCKET/state"
+        LOCK_FILE="$CLOUDCRAFT_DIR/backup.lock"
+        STAMP="$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID:-manual}"
+        PREFIX="$BACKUP_ROOT/$STAMP"
+
+        exec 9>"$LOCK_FILE"
+        if ! flock -n 9; then
+          echo "[$(date -u)] Backup already running; skipping."
+          exit 0
+        fi
+
+        echo "[$(date -u)] Starting backup $STAMP"
+        sync
+
+        # First pass. Do not use --delete here: a transient local file
+        # disappearance must never erase the remote backup.
+        aws s3 sync \
+          "$HOME/.minecraft/" \
+          "$PREFIX/minecraft/" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --no-progress \
+          --only-show-errors
+
+        aws s3 sync \
+          "$HOME/.tlauncher/" \
+          "$PREFIX/tlauncher/" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --no-progress \
+          --only-show-errors
+
+        # Give filesystem writers a moment, then repeat the sync.
+        sync
+        sleep 3
+
+        # Second pass is the commit preparation pass. --delete removes
+        # objects that no longer exist locally, but only inside this new
+        # snapshot prefix.
+        aws s3 sync \
+          "$HOME/.minecraft/" \
+          "$PREFIX/minecraft/" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --no-progress \
+          --only-show-errors \
+          --delete
+
+        aws s3 sync \
+          "$HOME/.tlauncher/" \
+          "$PREFIX/tlauncher/" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --no-progress \
+          --only-show-errors \
+          --delete
+
+        # COMPLETE is the commit marker. Restore code must never use a
+        # snapshot without this marker.
+        printf '%s\n' "$STAMP" | aws s3 cp - \
+          "$PREFIX/COMPLETE" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --only-show-errors
+
+        printf '%s\n' "$STAMP" | aws s3 cp - \
+          "$STATE_ROOT/latest.txt" \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          --only-show-errors
+
+        echo "[$(date -u)] Backup $STAMP committed successfully."
+
+        # Keep the newest two committed snapshots. The newest snapshot is
+        # never deleted, and the old snapshot is only removed AFTER the
+        # new COMPLETE marker and latest pointer have been written.
+        mapfile -t SNAPSHOTS < <(
+          aws s3api list-objects-v2 \
+            --bucket "$MINIO_BUCKET" \
+            --prefix "backups/" \
+            --delimiter / \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            --query 'CommonPrefixes[].Prefix' \
+            --output text 2>/dev/null \
+          | tr '\t' '\n' \
+          | sed -E 's#^backups/##; s#/$##' \
+          | grep -E '^[0-9]{8}T[0-9]{6}Z-' \
+          | sort -r || true
+        )
+
+        if [ "${#SNAPSHOTS[@]}" -gt 2 ]; then
+          for OLD in "${SNAPSHOTS[@]:2}"; do
+            echo "[$(date -u)] Pruning old snapshot: $OLD"
+            aws s3 rm \
+              "s3://$MINIO_BUCKET/backups/$OLD/" \
+              --recursive \
+              --endpoint-url "$MINIO_ENDPOINT" \
+              --only-show-errors || true
+          done
+        fi
+
+        echo "[$(date -u)] Backup size summary:"
+        aws s3 ls "$PREFIX/" \
+          --recursive \
+          --summarize \
+          --endpoint-url "$MINIO_ENDPOINT" \
+          | tail -4 || true
+        BACKUP
+
+        chmod +x "$CLOUDCRAFT_DIR/backup-once.sh"
+
+        cat > "$CLOUDCRAFT_DIR/backup-loop.sh" <<'LOOP'
+        #!/usr/bin/env bash
+        set -u
+
         while true; do
-
-          echo
-          echo "======================================"
-          echo "CloudCraft periodic backup"
-          echo "$(date)"
-          echo "======================================"
-
-          aws s3 sync \
-            "$HOME/.minecraft/" \
-            "s3://cloudcraft/minecraft/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --no-progress \
-            || true
-
-          aws s3 sync \
-            "$HOME/.tlauncher/" \
-            "s3://cloudcraft/tlauncher/" \
-            --endpoint-url "$MINIO_ENDPOINT" \
-            --no-progress \
-            || true
-
-          echo "Backup completed."
+          {
+            echo
+            echo "======================================"
+            echo "CloudCraft periodic backup"
+            echo "$(date -u)"
+            echo "======================================"
+            "$CLOUDCRAFT_DIR/backup-once.sh"
+          } >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
 
           sleep 300
-
         done
-        BACKUP
+        LOOP
 
         chmod +x "$CLOUDCRAFT_DIR/backup-loop.sh"
 
-        export MINIO_ENDPOINT="$MINIO_ENDPOINT"
-
-        nohup "$CLOUDCRAFT_DIR/backup-loop.sh" \
-          > "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 &
-
+        nohup "$CLOUDCRAFT_DIR/backup-loop.sh" >/dev/null 2>&1 &
         BACKUP_PID=$!
-
         echo "$BACKUP_PID" > "$CLOUDCRAFT_DIR/backup.pid"
+
+        # Do one backup immediately instead of waiting five minutes.
+        "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
 
         echo "Backup loop PID: $BACKUP_PID"
 
@@ -1120,6 +1247,8 @@ jobs:
           echo "- noVNC WebSocket"
           echo "- Cloudflare edge tunnel"
           echo "- Software OpenGL via Mesa/llvmpipe"
+          echo "- MinIO committed snapshots with COMPLETE marker"
+          echo "- Periodic backup: every 5 minutes"
           echo ""
           echo "## ? Minecraft"
           echo ""
@@ -1167,6 +1296,11 @@ jobs:
 
         echo
 
+        # GitHub cancellation may terminate this step before later steps
+        # are scheduled. Trap termination so the latest state still gets
+        # one last committed backup.
+        trap 'echo "CloudCraft stopping; running final safe backup..."; "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true' EXIT INT TERM
+
         while true; do
 
           echo
@@ -1198,13 +1332,13 @@ jobs:
 
 
     # ============================================================
-    # 32. FINAL BACKUP
+    # 32. FINAL SAFE BACKUP
     #
-    # This normally runs if the job is stopped gracefully.
-    # Periodic backups are still the primary protection.
+    # This is a second safety net. The Keep CloudCraft alive trap
+    # above is the important path for GitHub cancellation.
     # ============================================================
 
-    - name: Final MinIO backup
+    - name: Final safe MinIO backup
       if: always()
       shell: bash
       env:
@@ -1212,21 +1346,14 @@ jobs:
       run: |
         set +e
 
-        echo "Starting final backup..."
-
-        aws s3 sync \
-          "$HOME/.minecraft/" \
-          "s3://cloudcraft/minecraft/" \
-          --endpoint-url "$MINIO_ENDPOINT" \
-          --no-progress
-
-        aws s3 sync \
-          "$HOME/.tlauncher/" \
-          "s3://cloudcraft/tlauncher/" \
-          --endpoint-url "$MINIO_ENDPOINT" \
-          --no-progress
-
-        echo "Final backup complete."
+        if [ -x "$CLOUDCRAFT_DIR/backup-once.sh" ]; then
+          echo "Starting final safe backup..."
+          "$CLOUDCRAFT_DIR/backup-once.sh" \
+            >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1
+          echo "Final safe backup finished."
+        else
+          echo "Backup script is not available."
+        fi
 
 
     # ============================================================
@@ -1260,4 +1387,4 @@ jobs:
 
         echo
         echo "===== Backup ====="
-        tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" || tr
+        tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" || true
