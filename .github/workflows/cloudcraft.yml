@@ -16,11 +16,7 @@ env:
   MINECRAFT_VERSION: "1.21.11"
   VNC_PORT: "5900"
   NOVNC_PORT: "6080"
-  AWS_RETRY_MODE: standard
-  AWS_MAX_ATTEMPTS: "10"
-  AWS_S3_MAX_CONCURRENT_REQUESTS: "4"
-  AWS_S3_MULTIPART_THRESHOLD: "64MB"
-  AWS_S3_MULTIPART_CHUNKSIZE: "16MB"
+  AWS_MAX_ATTEMPTS: "4"
 
 jobs:
   cloudcraft:
@@ -39,7 +35,6 @@ jobs:
           echo "CPU: $(nproc)"
           free -h
           df -h
-          lspci | grep -Ei 'vga|3d|display' || true
 
       - name: Install Java 21
         shell: bash
@@ -61,7 +56,7 @@ jobs:
             libxfixes3 libxcursor1 libxinerama1 libxdamage1 \
             libxcomposite1 libxtst6 libxkbcommon0 libxkbcommon-x11-0 \
             libasound2t64 libpulse0 unzip zip curl wget git \
-            ca-certificates python3 python3-venv jq openssl zstd tar
+            ca-certificates jq openssl zstd tar
 
       - name: Prepare CloudCraft directories
         shell: bash
@@ -78,7 +73,6 @@ jobs:
           tags: tag:cloudcraft-runner
           version: latest
           use-cache: true
-          log-mode: normal
 
       - name: Verify Tailscale
         shell: bash
@@ -93,7 +87,7 @@ jobs:
           MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
         run: |
           set -euxo pipefail
-          curl --fail --silent --show-error --max-time 10 \
+          curl --fail --silent --show-error --max-time 15 \
             "$MINIO_ENDPOINT/minio/health/live"
           echo "MinIO is reachable."
 
@@ -106,10 +100,10 @@ jobs:
             exit 0
           fi
           cd "$CLOUDCRAFT_DIR/tmp"
-          rm -rf aws awscliv2.zip
           curl --fail --location --retry 5 --retry-delay 2 \
             -o awscliv2.zip \
             "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+          rm -rf aws
           unzip -q awscliv2.zip
           sudo ./aws/install --update
           aws --version
@@ -139,10 +133,11 @@ jobs:
           MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
         run: |
           set -euxo pipefail
-          aws s3api head-bucket --bucket "$MINIO_BUCKET" \
-            --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1 || \
-          aws s3api create-bucket --bucket "$MINIO_BUCKET" \
-            --endpoint-url "$MINIO_ENDPOINT"
+          if ! aws s3api head-bucket --bucket "$MINIO_BUCKET" \
+            --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1; then
+            aws s3api create-bucket --bucket "$MINIO_BUCKET" \
+              --endpoint-url "$MINIO_ENDPOINT"
+          fi
 
       - name: Restore latest CloudCraft snapshot
         shell: bash
@@ -153,9 +148,11 @@ jobs:
           mkdir -p "$HOME/.minecraft" "$HOME/.tlauncher"
           SNAPSHOT=""
 
-          if aws s3 cp "s3://$MINIO_BUCKET/state/latest.txt" - \
-            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors \
-            > "$CLOUDCRAFT_DIR/state/latest.txt" 2>/dev/null; then
+          if aws s3api get-object \
+            --bucket "$MINIO_BUCKET" \
+            --key state/latest.txt \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            "$CLOUDCRAFT_DIR/state/latest.txt" >/dev/null 2>&1; then
             SNAPSHOT="$(tr -d '\r\n' < "$CLOUDCRAFT_DIR/state/latest.txt")"
           fi
 
@@ -163,36 +160,37 @@ jobs:
             --bucket "$MINIO_BUCKET" \
             --key "backups/$SNAPSHOT/COMPLETE" \
             --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1; then
-            echo "Restoring committed archive snapshot: $SNAPSHOT"
-            aws s3 cp "s3://$MINIO_BUCKET/backups/$SNAPSHOT/minecraft.tar.zst" \
-              "$CLOUDCRAFT_DIR/tmp/minecraft.tar.zst" \
-              --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
-            aws s3 cp "s3://$MINIO_BUCKET/backups/$SNAPSHOT/tlauncher.tar.zst" \
-              "$CLOUDCRAFT_DIR/tmp/tlauncher.tar.zst" \
-              --endpoint-url "$MINIO_ENDPOINT" --only-show-errors
-
+            echo "Restoring committed snapshot: $SNAPSHOT"
+            aws s3api get-object \
+              --bucket "$MINIO_BUCKET" \
+              --key "backups/$SNAPSHOT/minecraft.tar.zst" \
+              --endpoint-url "$MINIO_ENDPOINT" \
+              "$CLOUDCRAFT_DIR/tmp/minecraft.tar.zst" >/dev/null
+            aws s3api get-object \
+              --bucket "$MINIO_BUCKET" \
+              --key "backups/$SNAPSHOT/tlauncher.tar.zst" \
+              --endpoint-url "$MINIO_ENDPOINT" \
+              "$CLOUDCRAFT_DIR/tmp/tlauncher.tar.zst" >/dev/null
             rm -rf "$HOME/.minecraft" "$HOME/.tlauncher"
             mkdir -p "$HOME/.minecraft" "$HOME/.tlauncher"
             tar --zstd -xf "$CLOUDCRAFT_DIR/tmp/minecraft.tar.zst" -C "$HOME/.minecraft"
             tar --zstd -xf "$CLOUDCRAFT_DIR/tmp/tlauncher.tar.zst" -C "$HOME/.tlauncher"
-            echo "Archive restore complete."
+            echo "Snapshot restore complete."
           else
-            echo "No complete archive snapshot found; starting with existing/empty local state."
+            echo "No committed snapshot found; starting with local/empty state."
           fi
 
       - name: Start virtual display
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$CLOUDCRAFT_DIR/logs"
           pkill Xvfb || true
           Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -ac \
             +extension GLX +extension RANDR +extension RENDER -noreset \
             > "$CLOUDCRAFT_DIR/logs/xvfb.log" 2>&1 &
-          XVFB_PID=$!
-          echo "$XVFB_PID" > "$CLOUDCRAFT_DIR/xvfb.pid"
+          echo $! > "$CLOUDCRAFT_DIR/xvfb.pid"
           sleep 3
-          kill -0 "$XVFB_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/xvfb.log"; exit 1; }
+          kill -0 "$(cat "$CLOUDCRAFT_DIR/xvfb.pid")" 2>/dev/null
           xdpyinfo >/dev/null
 
       - name: Start Fluxbox
@@ -219,7 +217,7 @@ jobs:
           VNC_PASSWORD="$(openssl rand -hex 4)"
           printf '%s\n' "$VNC_PASSWORD" > "$CLOUDCRAFT_DIR/vnc-password.txt"
           chmod 600 "$CLOUDCRAFT_DIR/vnc-password.txt"
-          x11vnc -storepasswd "$VNC_PASSWORD" "$CLOUDCRAFT_DIR/vnc-passwd"
+          x11vnc -storepasswd "$VNC_PASSWORD" "$CLOUDCRAFT_DIR/vnc-passwd" >/dev/null
           chmod 600 "$CLOUDCRAFT_DIR/vnc-passwd"
           echo "VNC_PASSWORD=$VNC_PASSWORD" >> "$GITHUB_ENV"
           {
@@ -239,10 +237,12 @@ jobs:
             -noxdamage -noxfixes -noxrecord -cursor arrow \
             -wait 2 -defer 2 -threads -localhost \
             > "$CLOUDCRAFT_DIR/logs/x11vnc.log" 2>&1 &
-          X11VNC_PID=$!
-          echo "$X11VNC_PID" > "$CLOUDCRAFT_DIR/x11vnc.pid"
+          echo $! > "$CLOUDCRAFT_DIR/x11vnc.pid"
           sleep 3
-          kill -0 "$X11VNC_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/x11vnc.log"; exit 1; }
+          kill -0 "$(cat "$CLOUDCRAFT_DIR/x11vnc.pid")" 2>/dev/null || {
+            cat "$CLOUDCRAFT_DIR/logs/x11vnc.log"
+            exit 1
+          }
 
       - name: Install noVNC
         shell: bash
@@ -257,12 +257,10 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          pkill -f 'novnc_proxy.*6080' || true
           "$CLOUDCRAFT_DIR/novnc/utils/novnc_proxy" \
             --vnc 127.0.0.1:5900 --listen 127.0.0.1:6080 \
             > "$CLOUDCRAFT_DIR/logs/novnc.log" 2>&1 &
-          NOVNC_PID=$!
-          echo "$NOVNC_PID" > "$CLOUDCRAFT_DIR/novnc.pid"
+          echo $! > "$CLOUDCRAFT_DIR/novnc.pid"
           for i in {1..20}; do
             if curl --silent --fail --max-time 3 \
               http://127.0.0.1:6080/vnc.html >/dev/null; then
@@ -291,11 +289,11 @@ jobs:
           "$CLOUDCRAFT_DIR/cloudflared" tunnel --no-autoupdate \
             --url http://127.0.0.1:6080 \
             > "$CLOUDCRAFT_DIR/logs/cloudflared.log" 2>&1 &
-          CLOUDFLARED_PID=$!
-          echo "$CLOUDFLARED_PID" > "$CLOUDCRAFT_DIR/cloudflared.pid"
+          echo $! > "$CLOUDCRAFT_DIR/cloudflared.pid"
           TUNNEL_URL=""
           for i in {1..60}; do
-            if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+            PID="$(cat "$CLOUDCRAFT_DIR/cloudflared.pid")"
+            if ! kill -0 "$PID" 2>/dev/null; then
               cat "$CLOUDCRAFT_DIR/logs/cloudflared.log"
               exit 1
             fi
@@ -325,12 +323,6 @@ jobs:
           cd "$CLOUDCRAFT_DIR/tlauncher"
           curl --fail --location --retry 5 --retry-delay 2 \
             -o TLauncher.v17.zip "$TLAUNCHER_URL"
-
-      - name: Extract TLauncher
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cd "$CLOUDCRAFT_DIR/tlauncher"
           rm -rf extracted
           mkdir -p extracted
           unzip -o TLauncher.v17.zip -d extracted
@@ -341,7 +333,7 @@ jobs:
           set -euxo pipefail
           TLAUNCHER_JAR="$(find "$CLOUDCRAFT_DIR/tlauncher/extracted" \
             -type f -iname 'TLauncher.jar' | head -n 1)"
-          [ -n "$TLAUNCHER_JAR" ] || { find "$CLOUDCRAFT_DIR/tlauncher/extracted" -type f; exit 1; }
+          [ -n "$TLAUNCHER_JAR" ] || exit 1
           echo "TLAUNCHER_JAR=$TLAUNCHER_JAR" >> "$GITHUB_ENV"
 
       - name: Launch TLauncher manually
@@ -356,10 +348,12 @@ jobs:
           cd "$(dirname "$TLAUNCHER_JAR")"
           java -Dfile.encoding=UTF-8 -jar "$TLAUNCHER_JAR" \
             > "$CLOUDCRAFT_DIR/logs/tlauncher.log" 2>&1 &
-          TLAUNCHER_PID=$!
-          echo "$TLAUNCHER_PID" > "$CLOUDCRAFT_DIR/tlauncher.pid"
+          echo $! > "$CLOUDCRAFT_DIR/tlauncher.pid"
           sleep 10
-          kill -0 "$TLAUNCHER_PID" 2>/dev/null || { cat "$CLOUDCRAFT_DIR/logs/tlauncher.log"; exit 1; }
+          kill -0 "$(cat "$CLOUDCRAFT_DIR/tlauncher.pid")" 2>/dev/null || {
+            cat "$CLOUDCRAFT_DIR/logs/tlauncher.log"
+            exit 1
+          }
 
       - name: Show TLauncher status
         shell: bash
@@ -368,7 +362,7 @@ jobs:
           ps aux | grep -i tlauncher | grep -v grep || true
           tail -100 "$CLOUDCRAFT_DIR/logs/tlauncher.log" || true
 
-      - name: Prepare archive-based MinIO backup
+      - name: Prepare archive backup script
         shell: bash
         env:
           MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
@@ -376,7 +370,7 @@ jobs:
           set -euxo pipefail
           cat > "$CLOUDCRAFT_DIR/backup-once.sh" <<'BACKUP'
           #!/usr/bin/env bash
-          set -euo pipefail
+          set -u
 
           BACKUP_ROOT="s3://$MINIO_BUCKET/backups"
           STATE_ROOT="s3://$MINIO_BUCKET/state"
@@ -395,77 +389,110 @@ jobs:
           echo "[$(date -u)] Starting archive backup $STAMP"
           sync
 
-          # IMPORTANT: Do not use aws s3 sync or ListObjectsV2 here.
-          # The current MinIO instance returns InternalError/listPathRaw
-          # for ListObjectsV2. We upload a small number of known objects.
-          tar --zstd -cf "$TMP/minecraft.tar.zst" \
-            --exclude='assets' \
-            --exclude='assets/*' \
-            --exclude='logs' \
-            --exclude='logs/*' \
-            --exclude='crash-reports' \
-            --exclude='crash-reports/*' \
-            -C "$HOME/.minecraft" .
+          make_archive() {
+            local source="$1"
+            local output="$2"
+            shift 2
+            echo "Creating $output from $source"
+            set +e
+            tar --zstd -cf "$output" "$@" -C "$source" .
+            local rc=$?
+            set -e
+            if [ "$rc" -gt 1 ]; then
+              echo "tar failed for $output with exit code $rc"
+              return "$rc"
+            fi
+            if [ "$rc" -eq 1 ]; then
+              echo "tar reported files changing during backup; archive kept."
+            fi
+            test -s "$output"
+            ls -lh "$output"
+          }
 
-          tar --zstd -cf "$TMP/tlauncher.tar.zst" \
-            --exclude='logs' \
-            --exclude='logs/*' \
-            --exclude='temp' \
-            --exclude='temp/*' \
-            --exclude='cache' \
-            --exclude='cache/*' \
-            -C "$HOME/.tlauncher" .
+          make_archive "$HOME/.minecraft" "$TMP/minecraft.tar.zst" \
+            --exclude='./assets' \
+            --exclude='./assets/*' \
+            --exclude='./logs' \
+            --exclude='./logs/*' \
+            --exclude='./crash-reports' \
+            --exclude='./crash-reports/*' \
+            --warning=no-file-changed \
+            --warning=no-file-removed
 
-          upload() {
+          make_archive "$HOME/.tlauncher" "$TMP/tlauncher.tar.zst" \
+            --exclude='./logs' \
+            --exclude='./logs/*' \
+            --exclude='./temp' \
+            --exclude='./temp/*' \
+            --exclude='./cache' \
+            --exclude='./cache/*' \
+            --warning=no-file-changed \
+            --warning=no-file-removed
+
+          put_object() {
             local file="$1"
             local key="$2"
+            local size
+            size="$(stat -c '%s' "$file")"
+            echo "PUT $key ($(numfmt --to=iec "$size"))"
+            if [ "$size" -ge 5368709120 ]; then
+              echo "ERROR: $key is >= 5 GiB; single PutObject is not supported."
+              return 1
+            fi
             local attempt
             for attempt in 1 2 3 4; do
-              echo "Upload attempt $attempt: $key"
-              if aws s3 cp "$file" "$PREFIX/$key" \
-                --endpoint-url "$MINIO_ENDPOINT" --only-show-errors; then
+              if aws s3api put-object \
+                --bucket "$MINIO_BUCKET" \
+                --key "${PREFIX#s3://$MINIO_BUCKET/}/$key" \
+                --body "$file" \
+                --content-length "$size" \
+                --endpoint-url "$MINIO_ENDPOINT" \
+                --no-cli-pager >/dev/null; then
+                echo "PUT OK: $key"
                 return 0
               fi
+              echo "PUT failed for $key; retry $attempt/4"
               sleep $((attempt * 5))
             done
-            echo "Upload failed: $key"
+            echo "PUT FAILED: $key"
             return 1
           }
 
-          upload "$TMP/minecraft.tar.zst" minecraft.tar.zst
-          upload "$TMP/tlauncher.tar.zst" tlauncher.tar.zst
+          put_object "$TMP/minecraft.tar.zst" minecraft.tar.zst || exit 1
+          put_object "$TMP/tlauncher.tar.zst" tlauncher.tar.zst || exit 1
 
           printf '%s\n' "$STAMP" > "$TMP/COMPLETE"
-          upload "$TMP/COMPLETE" COMPLETE
+          put_object "$TMP/COMPLETE" COMPLETE || exit 1
 
-          # Read the previous pointer directly. No bucket listing required.
           OLD_LATEST=""
           OLD_PREVIOUS=""
-          if aws s3 cp "$STATE_ROOT/latest.txt" - \
-            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors \
-            > "$TMP/old-latest.txt" 2>/dev/null; then
+          if aws s3api get-object \
+            --bucket "$MINIO_BUCKET" --key state/latest.txt \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            "$TMP/old-latest.txt" >/dev/null 2>&1; then
             OLD_LATEST="$(tr -d '\r\n' < "$TMP/old-latest.txt")"
           fi
-          if aws s3 cp "$STATE_ROOT/previous.txt" - \
-            --endpoint-url "$MINIO_ENDPOINT" --only-show-errors \
-            > "$TMP/old-previous.txt" 2>/dev/null; then
+          if aws s3api get-object \
+            --bucket "$MINIO_BUCKET" --key state/previous.txt \
+            --endpoint-url "$MINIO_ENDPOINT" \
+            "$TMP/old-previous.txt" >/dev/null 2>&1; then
             OLD_PREVIOUS="$(tr -d '\r\n' < "$TMP/old-previous.txt")"
           fi
 
           printf '%s\n' "$STAMP" > "$TMP/latest.txt"
-          upload "$TMP/latest.txt" "state/latest.txt"
+          put_object "$TMP/latest.txt" state/latest.txt || exit 1
 
           if [ -n "$OLD_LATEST" ]; then
             printf '%s\n' "$OLD_LATEST" > "$TMP/previous.txt"
-            upload "$TMP/previous.txt" "state/previous.txt"
+            put_object "$TMP/previous.txt" state/previous.txt || exit 1
           fi
 
-          # Keep at most two snapshots. Delete exact known objects instead
-          # of `aws s3 rm --recursive`, which would require ListObjectsV2.
           if [ -n "$OLD_PREVIOUS" ] && [ "$OLD_PREVIOUS" != "$STAMP" ] && [ "$OLD_PREVIOUS" != "$OLD_LATEST" ]; then
             for key in minecraft.tar.zst tlauncher.tar.zst COMPLETE; do
-              aws s3 rm "$BACKUP_ROOT/$OLD_PREVIOUS/$key" \
-                --endpoint-url "$MINIO_ENDPOINT" --only-show-errors || true
+              aws s3api delete-object \
+                --bucket "$MINIO_BUCKET" \
+                --key "backups/$OLD_PREVIOUS/$key" \
+                --endpoint-url "$MINIO_ENDPOINT" >/dev/null 2>&1 || true
             done
           fi
 
@@ -479,9 +506,14 @@ jobs:
         env:
           MINIO_ENDPOINT: ${{ secrets.MINIO_ENDPOINT }}
         run: |
-          set -euo pipefail
-          "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1
-          tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" || true
+          set -u
+          if ! "$CLOUDCRAFT_DIR/backup-once.sh" 2>&1 | tee "$CLOUDCRAFT_DIR/logs/backup.log"; then
+            echo "## Initial MinIO backup FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            tail -100 "$CLOUDCRAFT_DIR/logs/backup.log" >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
       - name: Start periodic MinIO backup loop
         shell: bash
@@ -494,16 +526,14 @@ jobs:
           set -u
           while true; do
             sleep 300
-            {
-              echo "===== CloudCraft periodic backup $(date -u) ====="
-              "$CLOUDCRAFT_DIR/backup-once.sh"
-            } >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
+            echo "===== CloudCraft periodic backup $(date -u) =====" >> "$CLOUDCRAFT_DIR/logs/backup.log"
+            "$CLOUDCRAFT_DIR/backup-once.sh" >> "$CLOUDCRAFT_DIR/logs/backup.log" 2>&1 || true
           done
           LOOP
           chmod +x "$CLOUDCRAFT_DIR/backup-loop.sh"
           nohup "$CLOUDCRAFT_DIR/backup-loop.sh" >/dev/null 2>&1 &
           echo $! > "$CLOUDCRAFT_DIR/backup.pid"
-          echo "Periodic backup loop started. First backup was already completed."
+          echo "Periodic backup loop started."
 
       - name: CloudCraft ready
         shell: bash
@@ -521,7 +551,7 @@ jobs:
             echo "- Tailscale tag: \`tag:cloudcraft-runner\`"
             echo "- Cloudflare Quick Tunnel: enabled"
             echo "- Persistence: archive-based MinIO snapshots"
-            echo "- Minecraft assets cache: excluded from backup"
+            echo "- Minecraft assets/logs/cache: excluded from backup"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep CloudCraft alive
